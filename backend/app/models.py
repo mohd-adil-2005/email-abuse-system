@@ -39,10 +39,13 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(50), unique=True, nullable=False, index=True)
-    hashed_password = Column(String(255), nullable=False)
+    hashed_password = Column(String(255), nullable=True)  # Nullable for OAuth-only users
     api_key = Column(String(255), nullable=True, unique=True, index=True)  # API key for programmatic access
     is_admin = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # OAuth2 / OIDC
+    oauth_provider = Column(String(20), nullable=True, index=True)  # 'google' | 'github'
+    oauth_id = Column(String(100), nullable=True, index=True)  # Provider's user ID
 
     # Relationship to audit logs
     audit_logs = relationship("AuditLog", back_populates="user")

@@ -10,7 +10,11 @@ python-dotenv
 python-multipart
 slowapi
 requests
+httpx
+authlib
 pytest
 pytest-asyncio
 scikit-learn
 joblib
+dnspython
+phonenumbers

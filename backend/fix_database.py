@@ -15,7 +15,7 @@ if not db_path.exists():
 print(f"Database path: {db_path}")
 
 if not db_path.exists():
-    print("❌ Database file not found. It will be created when the backend starts.")
+    print("Database file not found. It will be created when the backend starts.")
     exit(0)
 
 try:
@@ -26,25 +26,39 @@ try:
     cursor.execute("PRAGMA table_info(users)")
     columns = [row[1] for row in cursor.fetchall()]
     
-    if 'api_key' in columns:
-        print("✅ api_key column already exists. No changes needed.")
-    else:
+    if 'api_key' not in columns:
         print("Adding api_key column to users table...")
         cursor.execute("ALTER TABLE users ADD COLUMN api_key VARCHAR(255)")
         conn.commit()
-        print("✅ Successfully added api_key column!")
+        print("Successfully added api_key column!")
+        cursor.execute("PRAGMA table_info(users)")
+        columns = [row[1] for row in cursor.fetchall()]
+    else:
+        print("api_key column already exists.")
+    
+    # OAuth2 columns for social login
+    if 'oauth_provider' not in columns:
+        print("Adding oauth_provider column...")
+        cursor.execute("ALTER TABLE users ADD COLUMN oauth_provider VARCHAR(20)")
+        conn.commit()
+        print("Added oauth_provider column!")
+    if 'oauth_id' not in columns:
+        print("Adding oauth_id column...")
+        cursor.execute("ALTER TABLE users ADD COLUMN oauth_id VARCHAR(100)")
+        conn.commit()
+        print("Added oauth_id column!")
     
     conn.close()
-    print("✅ Database schema updated successfully!")
+    print("Database schema updated successfully!")
     
 except Exception as e:
-    print(f"❌ Error updating database: {e}")
+    print(f"Error updating database: {e}")
     print("\nTrying alternative: Delete database to recreate...")
     try:
         if db_path.exists():
             db_path.unlink()
-            print("✅ Database deleted. It will be recreated with the correct schema when backend starts.")
+            print("Database deleted. It will be recreated with the correct schema when backend starts.")
     except Exception as e2:
-        print(f"❌ Could not delete database: {e2}")
+        print(f"Could not delete database: {e2}")
 
 

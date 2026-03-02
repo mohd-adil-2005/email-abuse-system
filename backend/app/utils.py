@@ -11,10 +11,23 @@ import logging
 import joblib
 import numpy as np
 
+try:
+    import dns.resolver  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    dns = None
+
+try:
+    import phonenumbers  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    phonenumbers = None
+
 logger = logging.getLogger(__name__)
 
 # Salt for phone hashing (from environment)
 SALT = os.getenv("SALT", "default_salt_change_in_production")
+
+# Default phone region for format validation (e.g., IN, US)
+PHONE_DEFAULT_REGION = os.getenv("PHONE_DEFAULT_REGION", "IN")
 
 # Disposable email domains (fetched from GitHub)
 DISPOSABLE_DOMAINS: Set[str] = set()
@@ -56,7 +69,7 @@ def hash_phone(phone: str) -> str:
 
 def normalize_phone(phone: str) -> str:
     """
-    Normalize phone number to E.164 format.
+    Normalize phone number to E.164 format using phonenumbers when available.
     
     Args:
         phone: Raw phone number string
@@ -64,11 +77,109 @@ def normalize_phone(phone: str) -> str:
     Returns:
         Normalized phone number (e.g., +1234567890)
     """
-    # Remove all non-digit characters except +
+    # Prefer phonenumbers for correct international formatting
+    if phonenumbers is not None:
+        try:
+            parsed = phonenumbers.parse(phone, PHONE_DEFAULT_REGION)
+            if phonenumbers.is_possible_number(parsed):
+                return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+        except Exception:
+            # Fall back to simple normalization below
+            pass
+
+    # Fallback: remove all non-digits and prefix +
+    digits = "".join(filter(str.isdigit, phone))
+    if not digits:
+        return phone
+    if not phone.startswith("+"):
+        return "+" + digits
+    return "+" + digits
+
+
+def is_valid_phone_format(phone: str) -> bool:
+    """
+    Validate phone format using phonenumbers.
+    
+    Returns True if number is at least possible for the configured region.
+    """
+    if phonenumbers is None:
+        # If library not available, don't fail validation
+        logger.warning("phonenumbers not available; skipping strict phone format validation")
+        return True
+    try:
+        parsed = phonenumbers.parse(phone, PHONE_DEFAULT_REGION)
+        return phonenumbers.is_possible_number(parsed)
+    except Exception:
+        return False
+
+
+def has_mx_record(domain: str) -> bool:
+    """
+    Check if a domain has MX records (mail servers).
+
+    For reliability:
+    - Returns False on NXDOMAIN / NoAnswer / Timeout
+    - Returns True if at least one MX record exists
+    - Falls back to True if dnspython is not available
+    """
+    if not domain:
+        return False
+    # If dnspython import failed, don't break registration flow
+    if 'dns' not in globals() or getattr(dns, "resolver", None) is None:
+        logger.warning("dnspython not available; skipping MX validation")
+        return True
+    try:
+        answers = dns.resolver.resolve(domain, "MX", lifetime=2.0)
+        return len(answers) > 0
+    except Exception as e:
+        logger.info(f"MX lookup failed for {domain}: {e}")
+        return False
+
+
+def is_valid_email_domain(email: str) -> bool:
+    """
+    Check if an email's domain appears to accept mail (has MX).
+
+    This does NOT guarantee the mailbox exists, only that the
+    domain advertises mail servers.
+    """
+    if "@" not in email:
+        return False
+    domain = email.split("@", 1)[1].strip().lower()
+    if not domain:
+        return False
+    return has_mx_record(domain)
+
+
+def is_suspicious_phone(phone: str) -> bool:
+    """
+    Detect obviously fake/suspicious phone numbers.
+    
+    Returns True for:
+    - All same digit (e.g., 111111111111, 0000000000)
+    - Repeated short patterns (e.g., 121212121212)
+    - Too many repeated digits (e.g., 111222333)
+    """
     digits = ''.join(filter(str.isdigit, phone))
-    if not phone.startswith('+'):
-        return '+' + digits
-    return '+' + digits
+    if len(digits) < 6:
+        return False
+    # All same digit
+    if len(set(digits)) == 1:
+        return True
+    # Repeated 2-digit pattern (e.g., 12121212)
+    if len(digits) >= 6:
+        for pattern_len in (2, 3):
+            if len(digits) % pattern_len == 0:
+                pattern = digits[:pattern_len]
+                if pattern * (len(digits) // pattern_len) == digits:
+                    return True
+    # Same digit appears in >80% of positions
+    from collections import Counter
+    digit_counts = Counter(digits)
+    most_common_count = digit_counts.most_common(1)[0][1]
+    if most_common_count >= len(digits) * 0.8:
+        return True
+    return False
 
 
 def fetch_disposable_domains() -> Set[str]:
@@ -296,7 +407,7 @@ def fetch_disposable_domains() -> Set[str]:
     
     for url in urls:
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=2)  # Fast timeout; fallback if slow
             if response.status_code == 200:
                 if url.endswith('.json'):
                     domains = set(response.json())
@@ -524,15 +635,15 @@ def calculate_spam_score(email: str) -> Tuple[int, str]:
 
 def is_flagged_spam(spam_score: int) -> bool:
     """
-    Determine if email should be flagged based on spam score.
+    Determine if email should be flagged/blocked based on spam score.
     
     Args:
         spam_score: Spam score (0-100)
         
     Returns:
-        True if score > 70
+        True if score > 50 (lower threshold to catch random/fake-looking emails)
     """
-    return spam_score > 70
+    return spam_score > 50
 
 
 def initialize_disposable_domains():

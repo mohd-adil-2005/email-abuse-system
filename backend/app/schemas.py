@@ -72,6 +72,13 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class SignupRequest(BaseModel):
+    """Signup request schema."""
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=6)
+    is_admin: bool = False  # Register as admin (for admin dashboard access)
+
+
 class TokenResponse(BaseModel):
     """JWT token response."""
     access_token: str

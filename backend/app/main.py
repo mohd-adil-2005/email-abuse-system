@@ -3,13 +3,14 @@ FastAPI main application with all endpoints.
 """
 from fastapi import FastAPI, Depends, HTTPException, status, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from typing import List, Optional
 from datetime import timedelta
+import os
 import csv
 import json
 import xml.etree.ElementTree as ET
@@ -19,7 +20,7 @@ from .database import engine, get_db
 from .models import Base, User
 from .schemas import (
     RegistrationCheckRequest, RegistrationCheckResponse, RegistrationResponse,
-    RegistrationListResponse, LoginRequest, TokenResponse, UserResponse,
+    RegistrationListResponse, LoginRequest, SignupRequest, TokenResponse, UserResponse,
     OverrideRequest, OverrideResponse, StatsResponse, FlaggedListResponse,
     BulkBlockRequest, BulkBlockResponse, AuditLogResponse, AuditLogListResponse,
     APIKeyResponse, ManualUpdateRequest, ManualUpdateResponse,
@@ -28,14 +29,21 @@ from .schemas import (
 from .crud import (
     get_registration_by_email, get_registration_by_id, create_registration, get_registrations,
     get_flagged_registrations as get_flagged_registrations_crud, update_registration_status,
-    bulk_update_registration_status, get_user_by_username, get_stats,
+    bulk_update_registration_status, get_user_by_username, create_user, get_stats,
     create_audit_log, get_audit_logs, count_registrations_by_phone,
     hash_phone, normalize_phone, get_phone_registrations, get_blocked_registrations,
-    generate_api_key, update_registration_flags
+    generate_api_key, update_registration_flags, get_or_create_oauth_user
 )
 from .auth import verify_password, get_password_hash, create_access_token
 from .dependencies import get_current_user, get_current_admin_user, get_current_user_or_api_key, limiter
-from .utils import initialize_disposable_domains
+from .utils import initialize_disposable_domains, load_spam_model
+from .oauth import (
+    is_google_oauth_configured,
+    get_google_oauth_client,
+    fetch_google_user_info,
+    BACKEND_BASE_URL,
+    GOOGLE_CLIENT_ID,
+)
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -64,8 +72,15 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # Startup event
 @app.on_event("startup")
 async def startup_event():
-    """Initialize on startup: load disposable domains and seed admin user."""
+    """Initialize on startup: load disposable domains, ML model, and seed admin user."""
     initialize_disposable_domains()
+    load_spam_model()  # Preload ML model to avoid first-request latency
+    
+    # Log OAuth status
+    if is_google_oauth_configured():
+        print("OAuth: Google login enabled")
+    else:
+        print("OAuth: Google not configured (set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET in backend/.env)")
     
     # Seed admin user if not exists
     db = next(get_db())
@@ -84,8 +99,8 @@ async def startup_event():
 
 # Public endpoints
 @app.post("/check_registration", response_model=RegistrationCheckResponse)
-@limiter.limit("10/minute")
-async def check_registration(
+@limiter.limit("10000/minute")  # High limit for throughput (89+ RPS)
+def check_registration(
     request: Request,
     registration_data: RegistrationCheckRequest,
     db: Session = Depends(get_db)
@@ -96,7 +111,7 @@ async def check_registration(
     Rules:
     - Max 3 registrations per phone number
     - Temporary emails are blocked
-    - High spam score (>70) flags the registration
+    - High spam score (>50) or suspicious phone patterns block the registration
     """
     phone_normalized = normalize_phone(registration_data.phone)
     phone_hash_value = hash_phone(phone_normalized)
@@ -181,7 +196,12 @@ async def login(
 ):
     """Authenticate user and return JWT token."""
     user = get_user_by_username(db, login_data.username)
-    if not user or not verify_password(login_data.password, user.hashed_password):
+    if not user or not user.hashed_password:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password"
+        )
+    if not verify_password(login_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password"
@@ -189,6 +209,103 @@ async def login(
     
     access_token = create_access_token(data={"sub": user.username})
     return TokenResponse(access_token=access_token)
+
+
+@app.post("/signup", response_model=TokenResponse)
+@limiter.limit("10/minute")
+async def signup(
+    request: Request,
+    signup_data: SignupRequest,
+    db: Session = Depends(get_db)
+):
+    """Create a new admin/user account and return JWT token."""
+    try:
+        existing = get_user_by_username(db, signup_data.username)
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username already taken"
+            )
+        hashed = get_password_hash(signup_data.password)
+        user = create_user(
+            db=db,
+            username=signup_data.username,
+            hashed_password=hashed,
+            is_admin=bool(signup_data.is_admin),
+        )
+        access_token = create_access_token(data={"sub": user.username})
+        return TokenResponse(access_token=access_token)
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Signup failed: {str(e)}"
+        )
+
+
+# OAuth2 / OIDC - Google social login
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8501")
+
+
+@app.get("/auth/google")
+async def auth_google(request: Request):
+    """Redirect to Google OAuth consent."""
+    if not is_google_oauth_configured():
+        raise HTTPException(status_code=501, detail="Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.")
+    redirect_uri = f"{BACKEND_BASE_URL.rstrip('/')}/auth/google/callback"
+    client = get_google_oauth_client(redirect_uri)
+    auth_url = (
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={GOOGLE_CLIENT_ID}"
+        f"&redirect_uri={redirect_uri}"
+        "&response_type=code"
+        "&scope=openid+email+profile"
+        "&access_type=offline"
+        "&prompt=consent"
+    )
+    return RedirectResponse(url=auth_url)
+
+
+@app.get("/auth/google/callback")
+async def auth_google_callback(code: str = None, error: str = None, db: Session = Depends(get_db)):
+    """Handle Google OAuth callback and issue JWT."""
+    if error:
+        return RedirectResponse(url=f"{FRONTEND_URL}/?error=oauth_denied")
+    if not code:
+        return RedirectResponse(url=f"{FRONTEND_URL}/?error=no_code")
+    
+    redirect_uri = f"{BACKEND_BASE_URL.rstrip('/')}/auth/google/callback"
+    async with get_google_oauth_client(redirect_uri) as client:
+        token = await client.fetch_token(
+            "https://oauth2.googleapis.com/token",
+            code=code,
+            redirect_uri=redirect_uri,
+        )
+    if not token or "access_token" not in token:
+        return RedirectResponse(url=f"{FRONTEND_URL}/?error=token_fetch_failed")
+    
+    user_info = await fetch_google_user_info(token["access_token"])
+    if not user_info:
+        return RedirectResponse(url=f"{FRONTEND_URL}/?error=user_info_failed")
+    
+    user = get_or_create_oauth_user(
+        db=db,
+        provider="google",
+        oauth_id=user_info["id"],
+        email=user_info.get("email", ""),
+        name=user_info.get("name", ""),
+    )
+    access_token = create_access_token(data={"sub": user.username})
+    return RedirectResponse(url=f"{FRONTEND_URL}/?token={access_token}")
+
+
+@app.get("/auth/providers")
+async def auth_providers():
+    """Return which OAuth providers are configured."""
+    return {"google": is_google_oauth_configured()}
 
 
 # Protected endpoints
@@ -1133,4 +1250,20 @@ async def get_blocked_registrations_endpoint(
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+# Model info (for academic demo - shows training data size)
+@app.get("/model-info")
+async def get_model_info():
+    """Return ML model training metadata (dataset size, etc.) for academic demo."""
+    from pathlib import Path
+    import json
+    meta_path = Path(__file__).parent / "spam_model_info.json"
+    if not meta_path.exists():
+        return {"total_samples": 0, "message": "Model metadata not found. Run train_model.py first."}
+    try:
+        with open(meta_path) as f:
+            return json.load(f)
+    except Exception:
+        return {"total_samples": 0, "message": "Could not read model metadata."}
 

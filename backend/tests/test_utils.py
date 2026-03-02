@@ -4,7 +4,7 @@ Tests for utility functions.
 import pytest
 from app.utils import (
     hash_phone, normalize_phone, is_temporary_email,
-    calculate_spam_score, is_flagged_spam, calculate_entropy
+    calculate_spam_score, is_flagged_spam, calculate_entropy, is_suspicious_phone
 )
 
 
@@ -24,6 +24,15 @@ def test_normalize_phone():
     assert normalize_phone("1234567890") == "+1234567890"
     assert normalize_phone("+1234567890") == "+1234567890"
     assert normalize_phone("(123) 456-7890") == "+1234567890"
+
+
+def test_is_suspicious_phone():
+    """Test suspicious phone detection."""
+    assert is_suspicious_phone("111111111111") == True   # All same digit
+    assert is_suspicious_phone("0000000000") == True    # All zeros
+    assert is_suspicious_phone("121212121212") == True  # Repeated 2-digit pattern
+    assert is_suspicious_phone("+15551234567") == False # Normal number
+    assert is_suspicious_phone("1234567890") == False   # Normal number
 
 
 def test_calculate_entropy():
@@ -58,8 +67,8 @@ def test_calculate_spam_score():
 
 
 def test_is_flagged_spam():
-    """Test spam flagging logic."""
-    assert is_flagged_spam(71) == True
-    assert is_flagged_spam(70) == False
+    """Test spam flagging logic (threshold > 50)."""
+    assert is_flagged_spam(51) == True
     assert is_flagged_spam(50) == False
+    assert is_flagged_spam(49) == False
 

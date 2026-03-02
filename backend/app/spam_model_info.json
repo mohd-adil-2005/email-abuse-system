@@ -1,0 +1,19 @@
+{
+  "datasets": {
+    "SpamAssassin": {
+      "samples": 4192,
+      "ham": 2801,
+      "spam": 1391
+    },
+    "Enron-Spam": {
+      "samples": 33396,
+      "ham": 16544,
+      "spam": 16852
+    }
+  },
+  "training_date": "2026-03-02T23:03:06.885441",
+  "total_samples": 37588,
+  "total_ham": 19345,
+  "total_spam": 18243,
+  "model": "RandomForestClassifier (n_estimators=200, max_depth=15)"
+}

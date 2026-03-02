@@ -7,7 +7,16 @@ from typing import Optional, List, Tuple
 from datetime import datetime
 
 from .models import Registration, User, AuditLog
-from .utils import is_temporary_email, calculate_spam_score, is_flagged_spam, hash_phone, normalize_phone
+from .utils import (
+    is_temporary_email,
+    calculate_spam_score,
+    is_flagged_spam,
+    hash_phone,
+    normalize_phone,
+    is_suspicious_phone,
+    is_valid_email_domain,
+    is_valid_phone_format,
+)
 
 
 # Registration CRUD
@@ -44,6 +53,11 @@ def create_registration(
     
     # Check if temporary email
     is_temp = is_temporary_email(email)
+    # Check email domain MX (does domain accept mail?)
+    has_valid_domain = is_valid_email_domain(email)
+    # Validate phone number format (region-aware) and obvious fake patterns
+    valid_phone_format = is_valid_phone_format(phone)
+    suspicious_phone = is_suspicious_phone(phone_normalized)
     
     # Calculate spam score
     spam_score, calculated_notes = calculate_spam_score(email)
@@ -53,6 +67,12 @@ def create_registration(
     final_notes = []
     if is_temp:
         final_notes.append("Temporary email detected")
+    if not has_valid_domain:
+        final_notes.append("Email domain has no MX records (may not accept mail)")
+    if not valid_phone_format:
+        final_notes.append("Invalid phone format (phonenumbers validation)")
+    if suspicious_phone:
+        final_notes.append("Suspicious/fake phone pattern detected")
     if calculated_notes and calculated_notes != "No issues detected":
         final_notes.append(calculated_notes)
     if detection_notes:
@@ -60,11 +80,11 @@ def create_registration(
         
     merged_notes = "; ".join(final_notes) if final_notes else "No issues detected"
     
-    # Determine status
-    if is_temp or status == "blocked":
+    # Determine status: block temporary emails, invalid domains, invalid/suspicious phones, or high spam score
+    if is_temp or not has_valid_domain or not valid_phone_format or suspicious_phone or status == "blocked":
         final_status = "blocked"
     elif is_flagged_value:
-        final_status = status if status != "pending" else "pending"
+        final_status = "blocked"  # Block high spam score registrations (was pending)
     else:
         final_status = status
     
@@ -166,9 +186,9 @@ def update_registration_flags(
     if spam_score is not None:
         registration.spam_score = max(0, min(100, spam_score))
         # Auto-update flagged status based on spam score
-        if spam_score > 70:
+        if spam_score > 50:
             registration.is_flagged = True
-        elif spam_score <= 70 and is_flagged is None:
+        elif spam_score <= 50 and is_flagged is None:
             registration.is_flagged = False
     
     if detection_notes is not None:
@@ -232,6 +252,54 @@ def create_user(
 def get_user_by_api_key(db: Session, api_key: str) -> Optional[User]:
     """Get user by API key."""
     return db.query(User).filter(User.api_key == api_key).first()
+
+
+def get_user_by_oauth(db: Session, provider: str, oauth_id: str) -> Optional[User]:
+    """Get user by OAuth provider and ID."""
+    return db.query(User).filter(
+        User.oauth_provider == provider,
+        User.oauth_id == oauth_id
+    ).first()
+
+
+def get_or_create_oauth_user(
+    db: Session,
+    provider: str,
+    oauth_id: str,
+    email: str,
+    name: str,
+) -> User:
+    """
+    Get existing OAuth user or create new one.
+    Username is derived from email (or provider_id if no email).
+    """
+    from .auth import get_password_hash
+    
+    user = get_user_by_oauth(db, provider, oauth_id)
+    if user:
+        return user
+    
+    base_username = email.split("@")[0] if email and "@" in email else f"{provider}_{oauth_id}"
+    username = base_username
+    counter = 0
+    while db.query(User).filter(User.username == username).first():
+        counter += 1
+        username = f"{base_username}_{counter}"
+    
+    # OAuth users get a placeholder password (never used)
+    placeholder_hash = get_password_hash(f"oauth_{provider}_{oauth_id}_no_password")
+    
+    user = User(
+        username=username,
+        hashed_password=placeholder_hash,
+        oauth_provider=provider,
+        oauth_id=oauth_id,
+        is_admin=False,  # OAuth users are regular users by default
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
 
 
 def generate_api_key(db: Session, user_id: int) -> Optional[str]:

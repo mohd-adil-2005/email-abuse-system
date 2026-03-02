@@ -1,3 +1,4 @@
+import threading
 import time
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -7,16 +8,26 @@ import requests
 
 URL = "http://127.0.0.1:8000/check_registration"
 TOTAL_REQUESTS = 500
-MAX_WORKERS = 50
+MAX_WORKERS = 50  # Keep at 50; higher values (e.g. 100) caused failures
+
+_thread_local = threading.local()
+
+
+def _get_session() -> requests.Session:
+    """Per-thread session for connection reuse (thread-safe)."""
+    if not hasattr(_thread_local, "session"):
+        _thread_local.session = requests.Session()
+    return _thread_local.session
 
 
 def make_request(i: int) -> int | None:
     """Send a single test request and return HTTP status or None on error."""
+    session = _get_session()
     email = f"loadtest{i}@example.com"
     phone = f"+9198{random.randint(10_000_000, 99_999_999)}"
     payload = {"email": email, "phone": phone}
     try:
-        resp = requests.post(URL, json=payload, timeout=5)
+        resp = session.post(URL, json=payload, timeout=10)
         return resp.status_code
     except Exception:
         return None
