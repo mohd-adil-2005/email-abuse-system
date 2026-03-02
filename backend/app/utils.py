@@ -8,6 +8,8 @@ import requests
 import math
 from typing import List, Set, Tuple
 import logging
+import joblib
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,11 @@ RANDOM_PATTERNS = [
     r'^[0-9]{4,}[a-z]+@',  # Many digits followed by letters
     r'^[a-z0-9]{6,}[_-][a-z0-9]{6,}@',  # Random-seeming with separators
 ]
+
+
+# Global model variable
+SPAM_MODEL = None
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "spam_model.joblib")
 
 
 def hash_phone(phone: str) -> str:
@@ -381,15 +388,79 @@ def calculate_entropy(text: str) -> float:
     return entropy_value
 
 
+def extract_features(email: str) -> List[float]:
+    """
+    Extract numerical features from email for ML model.
+    Matches the 11-feature vector from the training script.
+    """
+    local_part = email.split('@')[0].lower() if '@' in email else email.lower()
+    
+    length = len(local_part)
+    digit_count = sum(c.isdigit() for c in local_part)
+    letter_count = sum(c.isalpha() for c in local_part)
+    special_count = length - digit_count - letter_count
+    
+    digit_ratio = digit_count / length if length > 0 else 0
+    letter_ratio = letter_count / length if length > 0 else 0
+    special_ratio = special_count / length if length > 0 else 0
+    
+    # New features for "Smarter" Model
+    vowels = set("aeiou")
+    vowel_count = sum(1 for c in local_part if c in vowels)
+    vowel_ratio = vowel_count / letter_count if letter_count > 0 else 0
+    
+    has_dot = 1 if "." in local_part else 0
+    has_underscore = 1 if "_" in local_part else 0
+    
+    max_consecutive_digits = 0
+    current_consecutive = 0
+    for char in local_part:
+        if char.isdigit():
+            current_consecutive += 1
+            max_consecutive_digits = max(max_consecutive_digits, current_consecutive)
+        else:
+            current_consecutive = 0
+            
+    entropy = calculate_entropy(local_part)
+    
+    # Keyword check (binary feature)
+    has_keyword = 1 if any(kw in local_part for kw in SPAM_KEYWORDS) else 0
+    
+    return [
+        float(length), 
+        float(digit_count), 
+        float(digit_ratio), 
+        float(letter_ratio), 
+        float(special_ratio), 
+        float(vowel_ratio),
+        float(has_dot),
+        float(has_underscore),
+        float(max_consecutive_digits),
+        float(entropy), 
+        float(has_keyword)
+    ]
+
+
+def load_spam_model():
+    """
+    Load the pre-trained Random Forest model.
+    """
+    global SPAM_MODEL
+    if SPAM_MODEL is None:
+        try:
+            if os.path.exists(MODEL_PATH):
+                SPAM_MODEL = joblib.load(MODEL_PATH)
+                logger.info(f"Random Forest model loaded from {MODEL_PATH}")
+            else:
+                logger.warning(f"Model file not found at {MODEL_PATH}. Falling back to rule-based detection.")
+        except Exception as e:
+            logger.error(f"Error loading ML model: {e}")
+    return SPAM_MODEL
+
+
 def calculate_spam_score(email: str) -> Tuple[int, str]:
     """
     Calculate spam score for an email (0-100).
-    
-    Scoring:
-    - Keywords: +25 points
-    - Excessive numeric ratio (>70%): +20 points (only if very high)
-    - Random patterns: +15 points
-    - High entropy (>3.5): +30 points
     
     Args:
         email: Email address to score
@@ -401,57 +472,54 @@ def calculate_spam_score(email: str) -> Tuple[int, str]:
     notes = []
     local_part = email.split('@')[0].lower() if '@' in email else email.lower()
     
+    # Try to use Random Forest model first
+    model = load_spam_model()
+    if model is not None:
+        try:
+            features = extract_features(email)
+            # Prediction probability for class 1 (Abuse)
+            # model.predict_proba returns [[prob_0, prob_1]]
+            prob = model.predict_proba([features])[0][1]
+            score = int(prob * 100)
+            notes.append(f"Random Forest prediction: {score}%")
+            
+            # If score is very high from ML, we can return early or combine
+            if score > 80:
+                return score, "; ".join(notes)
+        except Exception as e:
+            logger.error(f"ML Model prediction failed: {e}")
+            notes.append("ML detection failed, using rules")
+
+    # Heuristic fallback/combination logic
+    # (Original rules remain as fallback or secondary validation)
+    rule_score = 0
+    
     # Check for spam keywords
     for keyword in SPAM_KEYWORDS:
         if keyword in local_part:
-            score += 25
-            notes.append(f"Contains keyword: {keyword}")
-            break  # Only count once
+            rule_score += 25
+            notes.append(f"Rule Match: Keyword '{keyword}'")
+            break
     
-    # Check for excessive numeric ratio (only flag if VERY high, like user123456789)
-    # Normal emails like john.doe123 or user2024 are fine
+    # digit check
     digit_count = sum(c.isdigit() for c in local_part)
-    letter_count = sum(c.isalpha() for c in local_part)
     total_chars = len(local_part)
-    
     if total_chars > 0:
         digit_ratio = digit_count / total_chars
-        
-        # Only flag if:
-        # 1. More than 70% digits (very high ratio)
-        # 2. AND has more than 6 digits (not just a year like 2024)
-        # 3. AND total length > 8 (not short like user123)
-        if digit_ratio > 0.7 and digit_count > 6 and total_chars > 8:
-            score += 20
-            notes.append(f"Excessive numeric ratio ({digit_ratio:.0%} digits)")
-        # Also flag if it's mostly digits with very few letters (like 123456789@domain.com)
-        elif digit_count > 8 and letter_count < 3 and total_chars > 10:
-            score += 20
-            notes.append("Mostly numeric with few letters")
-    
-    # Check random patterns (more specific patterns)
-    for pattern in RANDOM_PATTERNS:
-        if re.match(pattern, local_part):
-            # Only flag if it's actually random-looking, not normal patterns
-            # Skip if it looks like a normal email (has common separators or reasonable length)
-            if not ('.' in local_part or '_' in local_part or '-' in local_part) or len(local_part) > 15:
-                score += 15
-                notes.append("Matches random pattern")
-                break
-    
-    # Check entropy (only flag if very high AND long)
+        if digit_ratio > 0.7 and digit_count > 6:
+            rule_score += 20
+            notes.append("Rule Match: High numerical ratio")
+
+    # entropy
     local_entropy = calculate_entropy(local_part)
-    if local_entropy > 3.5 and len(local_part) > 12:
-        score += 30
-        notes.append(f"High entropy: {local_entropy:.2f}")
-    elif local_entropy > 4.0:  # Very high entropy regardless of length
-        score += 30
-        notes.append(f"Very high entropy: {local_entropy:.2f}")
+    if local_entropy > 3.8:
+        rule_score += 30
+        notes.append("Rule Match: High entropy")
+
+    # Final score is a mix or the maximum of both if ML is available
+    final_score = max(score, min(rule_score, 100))
     
-    # Cap at 100
-    score = min(score, 100)
-    
-    return score, "; ".join(notes) if notes else "No issues detected"
+    return final_score, "; ".join(notes) if notes else "No issues detected"
 
 
 def is_flagged_spam(spam_score: int) -> bool:

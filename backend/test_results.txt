@@ -1,0 +1,15 @@
+
+Testing: john.doe.testing@gmail.com / +12345678901
+Status: approved
+Spam Score: 73
+Notes: Random Forest prediction: 73%; Rule Match: Keyword 'test'
+
+Testing: a1b2c3d4e5f6g7h8@tempmail.com / +98765432109
+Status: blocked
+Spam Score: 100
+Notes: Temporary email detected. Random Forest prediction: 100%
+
+Testing: free.promo.spam@example.com / +11223344556
+Status: approved
+Spam Score: 64
+Notes: Random Forest prediction: 64%; Rule Match: Keyword 'spam'
