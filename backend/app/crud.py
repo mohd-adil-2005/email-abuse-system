@@ -30,7 +30,8 @@ def create_registration(
     db: Session,
     email: str,
     phone: str,
-    status: str = "pending"
+    status: str = "pending",
+    detection_notes: Optional[str] = None
 ) -> Registration:
     """
     Create a new registration with abuse detection.
@@ -45,15 +46,25 @@ def create_registration(
     is_temp = is_temporary_email(email)
     
     # Calculate spam score
-    spam_score, detection_notes = calculate_spam_score(email)
+    spam_score, calculated_notes = calculate_spam_score(email)
     is_flagged_value = is_flagged_spam(spam_score)
     
-    # Determine status
+    # Combine notes if both provided
+    final_notes = []
     if is_temp:
+        final_notes.append("Temporary email detected")
+    if calculated_notes and calculated_notes != "No issues detected":
+        final_notes.append(calculated_notes)
+    if detection_notes:
+        final_notes.append(detection_notes)
+        
+    merged_notes = "; ".join(final_notes) if final_notes else "No issues detected"
+    
+    # Determine status
+    if is_temp or status == "blocked":
         final_status = "blocked"
-        detection_notes = f"Temporary email detected. {detection_notes}" if detection_notes else "Temporary email detected"
     elif is_flagged_value:
-        final_status = status if status != "pending" else "pending"  # Keep pending if flagged but not temp
+        final_status = status if status != "pending" else "pending"
     else:
         final_status = status
     
@@ -65,7 +76,7 @@ def create_registration(
         is_temporary=is_temp,
         spam_score=spam_score,
         is_flagged=is_flagged_value,
-        detection_notes=detection_notes
+        detection_notes=merged_notes
     )
     
     db.add(registration)

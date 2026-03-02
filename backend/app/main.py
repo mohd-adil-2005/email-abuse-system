@@ -120,17 +120,26 @@ async def check_registration(
     # Check phone limit (max 3)
     count = count_registrations_by_phone(db, phone_hash_value)
     if count >= 3:
+        # Create registration even if blocked to log it in dashboard
+        registration = create_registration(
+            db=db,
+            email=registration_data.email,
+            phone=registration_data.phone,
+            status="blocked",
+            detection_notes="Phone number limit exceeded (max 3 registrations)"
+        )
+        
         return RegistrationCheckResponse(
             allowed=False,
-            email=registration_data.email,
-            phone_hash=phone_hash_value,
-            status="blocked",
-            is_temporary=False,
-            spam_score=0,
-            is_flagged=False,
-            detection_notes="Phone number limit exceeded (max 3 registrations)",
+            email=registration.email,
+            phone_hash=registration.phone_hash,
+            status=registration.status,
+            is_temporary=registration.is_temporary,
+            spam_score=registration.spam_score,
+            is_flagged=registration.is_flagged,
+            detection_notes=registration.detection_notes,
             message="Maximum registrations (3) reached for this phone number",
-            registration_id=None
+            registration_id=registration.id
         )
     
     # Create registration (will detect temp/spam)
