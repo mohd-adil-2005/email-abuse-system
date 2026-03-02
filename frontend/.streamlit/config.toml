@@ -1,0 +1,17 @@
+# Streamlit config for Email Abuse Dashboard
+# Mobile-responsive and tablet-friendly settings
+
+[browser]
+# Prefer minimal chrome for mobile
+gatherUsageStats = false
+
+[client]
+showErrorDetails = true
+
+[theme]
+# Force dark mode for this project (regardless of user setting)
+base = "dark"
+primaryColor = "#1f77b4"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1b1f2a"
+textColor = "#FFFFFF"

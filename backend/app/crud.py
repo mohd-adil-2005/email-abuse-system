@@ -6,7 +6,7 @@ from sqlalchemy import func, and_, or_
 from typing import Optional, List, Tuple
 from datetime import datetime
 
-from .models import Registration, User, AuditLog
+from .models import Registration, User, AuditLog, PhoneOverride
 from .utils import (
     is_temporary_email,
     calculate_spam_score,
@@ -62,6 +62,14 @@ def create_registration(
     # Calculate spam score
     spam_score, calculated_notes = calculate_spam_score(email)
     is_flagged_value = is_flagged_spam(spam_score)
+    
+    # Check if this phone has an override/whitelist for suspicious pattern
+    phone_override = db.query(PhoneOverride).filter(
+        PhoneOverride.phone_hash == phone_hash_value,
+        PhoneOverride.allow_suspicious == True,
+    ).first()
+    if phone_override and suspicious_phone:
+        suspicious_phone = False
     
     # Combine notes if both provided
     final_notes = []
@@ -417,7 +425,52 @@ def get_blocked_registrations(
         })
     
     result = list(phone_dict.values())
+
+    # Mark phones that have been manually whitelisted (override for suspicious pattern)
+    if result:
+        phone_hashes = [item["phone_hash"] for item in result]
+        overrides = db.query(PhoneOverride).filter(
+            PhoneOverride.phone_hash.in_(phone_hashes),
+            PhoneOverride.allow_suspicious == True,
+        ).all()
+        whitelisted_hashes = {ov.phone_hash for ov in overrides}
+        for item in result:
+            item["is_whitelisted"] = item["phone_hash"] in whitelisted_hashes
+
     return result, total
+
+
+def create_or_update_phone_override(
+    db: Session,
+    phone_hash: str,
+    phone_normalized: str,
+    created_by: int,
+    reason: str = "",
+    allow_suspicious: bool = True,
+) -> PhoneOverride:
+    """Create or update a per-phone override/whitelist entry."""
+    override = db.query(PhoneOverride).filter(PhoneOverride.phone_hash == phone_hash).first()
+    now = datetime.utcnow()
+    if override:
+        override.phone_normalized = phone_normalized
+        override.allow_suspicious = allow_suspicious
+        if reason:
+            override.reason = reason
+        override.created_at = now
+    else:
+        override = PhoneOverride(
+            phone_hash=phone_hash,
+            phone_normalized=phone_normalized,
+            allow_suspicious=allow_suspicious,
+            reason=reason,
+            created_by=created_by,
+            created_at=now,
+        )
+        db.add(override)
+
+    db.commit()
+    db.refresh(override)
+    return override
 
 
 # Stats

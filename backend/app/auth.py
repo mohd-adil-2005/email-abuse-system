@@ -10,7 +10,8 @@ import os
 # JWT settings
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+# Token expires after 1 day so admin is not logged out on every refresh
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))  # 1440 = 24 hours
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

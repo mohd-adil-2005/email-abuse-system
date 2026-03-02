@@ -7,7 +7,7 @@ pushd "%~dp0"
 
 :: Backend ko nayi window mein start karein
 echo Backend start ho raha hai...
-start "backend" cmd /k "cd /d %~dp0backend && py -m pip install -r requirements.txt && py -m uvicorn app.main:app --reload"
+start "backend" cmd /k "cd /d %~dp0backend && py -m pip install -r requirements.txt && py -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 2"
 
 :: Thoda wait karein taaki backend start ho jaye
 timeout /t 5 /nobreak >nul

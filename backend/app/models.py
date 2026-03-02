@@ -64,3 +64,17 @@ class AuditLog(Base):
     # Relationship to user
     user = relationship("User", back_populates="audit_logs")
 
+
+class PhoneOverride(Base):
+    """Per-phone override/whitelist for suspicious patterns."""
+    __tablename__ = "phone_overrides"
+
+    id = Column(Integer, primary_key=True, index=True)
+    phone_hash = Column(String(64), nullable=False, unique=True, index=True)
+    phone_normalized = Column(String(20), nullable=False)
+    allow_suspicious = Column(Boolean, default=True, nullable=False)
+    reason = Column(String(255), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+

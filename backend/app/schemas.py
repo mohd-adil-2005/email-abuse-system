@@ -221,3 +221,20 @@ class AuditLogListResponse(BaseModel):
     page_size: int
     total_pages: int
 
+
+# Phone override / whitelist
+class PhoneWhitelistRequest(BaseModel):
+    """Request to whitelist a phone number despite suspicious pattern."""
+    phone_hash: str
+    phone_normalized: str
+    reason: str = Field(..., min_length=5, max_length=500)
+
+
+class PhoneWhitelistResponse(BaseModel):
+    """Response for phone whitelist action."""
+    success: bool
+    phone_hash: str
+    phone_normalized: str
+    updated_registrations: int
+    message: str
+

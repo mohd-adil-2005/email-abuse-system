@@ -4,3 +4,4 @@ plotly
 requests
 reportlab
 python-dotenv
+extra-streamlit-components

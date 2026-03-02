@@ -9,7 +9,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from typing import List, Optional
-from datetime import timedelta
+from datetime import datetime, timedelta
 import os
 import csv
 import json
@@ -17,14 +17,15 @@ import xml.etree.ElementTree as ET
 import io
 
 from .database import engine, get_db
-from .models import Base, User
+from .models import Base, User, Registration
 from .schemas import (
     RegistrationCheckRequest, RegistrationCheckResponse, RegistrationResponse,
     RegistrationListResponse, LoginRequest, SignupRequest, TokenResponse, UserResponse,
     OverrideRequest, OverrideResponse, StatsResponse, FlaggedListResponse,
     BulkBlockRequest, BulkBlockResponse, AuditLogResponse, AuditLogListResponse,
     APIKeyResponse, ManualUpdateRequest, ManualUpdateResponse,
-    BulkRegistrationRequest, BulkRegistrationResponse, BulkRegistrationResult
+    BulkRegistrationRequest, BulkRegistrationResponse, BulkRegistrationResult,
+    PhoneWhitelistRequest, PhoneWhitelistResponse,
 )
 from .crud import (
     get_registration_by_email, get_registration_by_id, create_registration, get_registrations,
@@ -32,7 +33,8 @@ from .crud import (
     bulk_update_registration_status, get_user_by_username, create_user, get_stats,
     create_audit_log, get_audit_logs, count_registrations_by_phone,
     hash_phone, normalize_phone, get_phone_registrations, get_blocked_registrations,
-    generate_api_key, update_registration_flags, get_or_create_oauth_user
+    generate_api_key, update_registration_flags, get_or_create_oauth_user,
+    create_or_update_phone_override,
 )
 from .auth import verify_password, get_password_hash, create_access_token
 from .dependencies import get_current_user, get_current_admin_user, get_current_user_or_api_key, limiter
@@ -1242,6 +1244,71 @@ async def get_blocked_registrations_endpoint(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}"
+        )
+
+
+@app.post("/phone-whitelist", response_model=PhoneWhitelistResponse)
+async def whitelist_phone_number(
+    data: PhoneWhitelistRequest,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Whitelist a phone number so that repeated-digit/suspicious patterns
+    no longer block it automatically. Also approve existing blocked
+    registrations for this phone.
+    """
+    try:
+        override = create_or_update_phone_override(
+            db=db,
+            phone_hash=data.phone_hash,
+            phone_normalized=data.phone_normalized,
+            created_by=current_user.id,
+            reason=data.reason,
+            allow_suspicious=True,
+        )
+
+        # Approve existing blocked registrations for this phone
+        blocked_regs = db.query(Registration).filter(
+            Registration.phone_hash == data.phone_hash,
+            Registration.status == "blocked",
+        ).all()
+        note_suffix = f"; Phone whitelisted by {current_user.username}: {data.reason}"
+        for reg in blocked_regs:
+            reg.status = "approved"
+            reg.updated_at = datetime.utcnow()
+            reg.detection_notes = (reg.detection_notes or "") + note_suffix
+        updated_count = len(blocked_regs)
+        db.commit()
+
+        # Audit log
+        create_audit_log(
+            db=db,
+            user_id=current_user.id,
+            action="phone_whitelist",
+            details={
+                "phone_hash": data.phone_hash,
+                "phone_normalized": data.phone_normalized,
+                "reason": data.reason,
+                "updated_registrations": int(updated_count or 0),
+            },
+        )
+
+        return PhoneWhitelistResponse(
+            success=True,
+            phone_hash=override.phone_hash,
+            phone_normalized=override.phone_normalized,
+            updated_registrations=int(updated_count or 0),
+            message="Phone has been whitelisted and existing blocked registrations were approved.",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to whitelist phone: {str(e)}",
         )
 
 

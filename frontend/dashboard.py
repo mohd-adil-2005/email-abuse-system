@@ -12,22 +12,25 @@ from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 import io
+import os
 import time
 import json
 
 from utils import (
-    login, logout, is_authenticated, get_stats, get_registrations,
-    get_flagged_registrations, override_registration, bulk_block_registrations,
-    get_audit_logs, get_phone_registrations, get_blocked_registrations_list,
-    check_registration, manual_update_registration
+    login, signup, logout, is_authenticated, login_with_token, get_oauth_providers,
+    get_stats, get_registrations, get_flagged_registrations, override_registration,
+    bulk_block_registrations, get_audit_logs, get_phone_registrations,
+    get_blocked_registrations_list, check_registration, manual_update_registration,
+    get_model_info, whitelist_phone,
+    restore_session_from_cookie, save_auth_cookie, clear_auth_cookie,
 )
 
-# Page config
+# Page config - centered layout works better on mobile
 st.set_page_config(
     page_title="Email Abuse Detection Dashboard",
     page_icon="📧",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",  # Collapses on small screens
     menu_items={
         'Get Help': None,
         'Report a bug': None,
@@ -35,7 +38,7 @@ st.set_page_config(
     }
 )
 
-# Custom CSS
+# Mobile-responsive CSS
 st.markdown("""
     <style>
     .main-header {
@@ -57,6 +60,104 @@ st.markdown("""
     footer {visibility: hidden;}
     .stDeployButton {display: none;}
     div[data-testid="stToolbar"] {visibility: hidden;}
+    
+    /* Mobile & tablet responsive */
+    @media (max-width: 768px) {
+        .main-header { font-size: 1.5rem; margin-bottom: 1rem; }
+        /* Stack metric columns on mobile - 2 per row */
+        div[data-testid="column"] { min-width: 45% !important; flex: 1 1 45% !important; }
+        /* Full-width form inputs */
+        .stTextInput input, .stSelectbox > div { width: 100% !important; }
+        /* Touch-friendly buttons - min 44px tap target */
+        .stButton > button { min-height: 44px; padding: 0.5rem 1rem; font-size: 1rem; }
+        /* Reduce padding */
+        .main .block-container { padding: 1rem 1rem 2rem; max-width: 100%; }
+        /* Horizontally scrollable tables */
+        div[data-testid="stDataFrame"] { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+        /* Smaller charts on mobile */
+        .js-plotly-plot { min-height: 280px !important; }
+    }
+    @media (max-width: 480px) {
+        .main-header { font-size: 1.25rem; }
+        /* Single column metrics on very small screens */
+        div[data-testid="column"] { min-width: 100% !important; flex: 1 1 100% !important; }
+        .main .block-container { padding: 0.75rem; }
+    }
+    @media (min-width: 769px) and (max-width: 1024px) {
+        .main-header { font-size: 2rem; }
+        /* Tablet: 3-4 columns for metrics */
+        div[data-testid="column"] { min-width: 30% !important; flex: 1 1 30% !important; }
+        .main .block-container { padding: 1.5rem 2rem; }
+    }
+    /* Horizontal scroll wrapper for dataframes */
+    @media (max-width: 768px) {
+        .stDataFrame { overflow-x: auto !important; display: block !important; }
+        .stDataFrame > div { min-width: max-content; }
+    }
+    /* Tabs - wrap on small screens */
+    @media (max-width: 768px) {
+        [data-baseweb="tab-list"] { flex-wrap: wrap !important; }
+        [data-baseweb="tab"] { min-width: 120px; padding: 0.5rem 0.75rem; }
+    }
+    
+    /* Modern auth page styling */
+    .auth-container {
+        max-width: 420px;
+        margin: 2rem auto;
+        padding: 2.5rem;
+        background: linear-gradient(145deg, #1a1d29 0%, #252836 100%);
+        border-radius: 16px;
+        box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        border: 1px solid rgba(255,255,255,0.06);
+    }
+    .auth-title {
+        font-size: 1.75rem;
+        font-weight: 700;
+        color: #fff;
+        margin-bottom: 0.5rem;
+        letter-spacing: -0.02em;
+    }
+    .auth-subtitle {
+        color: #94a3b8;
+        font-size: 0.95rem;
+        margin-bottom: 2rem;
+    }
+    .oauth-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        padding: 12px 20px;
+        border-radius: 10px;
+        border: 1px solid rgba(255,255,255,0.1);
+        background: rgba(255,255,255,0.05);
+        color: #e2e8f0;
+        font-weight: 500;
+        transition: all 0.2s ease;
+    }
+    .oauth-btn:hover {
+        background: rgba(255,255,255,0.08);
+    }
+    .divider {
+        display: flex;
+        align-items: center;
+        margin: 1.5rem 0;
+        color: #64748b;
+        font-size: 0.8rem;
+    }
+    .divider::before, .divider::after {
+        content: '';
+        flex: 1;
+        height: 1px;
+        background: rgba(255,255,255,0.08);
+    }
+    .divider span { padding: 0 1rem; }
+    .logout-btn {
+        position: fixed;
+        top: 1rem;
+        right: 1rem;
+        z-index: 999;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -67,14 +168,34 @@ st.markdown("""
 def tab_overview():
     """Overview tab with metrics and charts."""
     st.header("📊 Overview")
+
+    # ML Model info (academic demo)
+    model_info = get_model_info()
+    if model_info and model_info.get("total_samples", 0) > 0:
+        total = model_info.get("total_samples", 0)
+        ham = model_info.get("total_ham", 0)
+        spam = model_info.get("total_spam", 0)
+        datasets = model_info.get("datasets", {})
+        training_date = model_info.get("training_date", "")
+        if training_date:
+            try:
+                dt = datetime.fromisoformat(training_date.replace("Z", "+00:00"))
+                training_date = dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+        st.info(
+            f"**🤖 ML Model (Academic Demo)** — Trained on **{total:,}** emails "
+            f"({ham:,} ham, {spam:,} spam) from SpamAssassin + Enron-Spam datasets. "
+            f"Last trained: {training_date}"
+        )
     
     # Add Registration Form
     with st.expander("➕ Add New Registration", expanded=False):
         st.subheader("Test Registration")
-        col1, col2 = st.columns(2)
-        with col1:
+        test_col1, test_col2 = st.columns([1, 1])
+        with test_col1:
             test_email = st.text_input("Email Address", placeholder="user@example.com", key="test_email")
-        with col2:
+        with test_col2:
             test_phone = st.text_input("Phone Number", placeholder="+1234567890", key="test_phone")
         
         if st.button("Check Registration", type="primary", key="check_reg_btn"):
@@ -86,7 +207,6 @@ def tab_overview():
                             st.success(f"✅ {result.get('message', 'Registration allowed')}")
                         else:
                             st.warning(f"⚠️ {result.get('message', 'Registration blocked')}")
-                        st.rerun()
             else:
                 st.error("Please enter both email and phone number")
         
@@ -104,22 +224,23 @@ def tab_overview():
     not_allowed = stats["blocked_registrations"] + stats["temporary_blocked"]
     allowed = stats["total_registrations"] - not_allowed
     
-    # Metrics
-    col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
-    
-    with col1:
-        st.metric("Total Registrations", stats["total_registrations"])
-    with col2:
-        st.metric("✅ Allowed", allowed, delta=None)
-    with col3:
-        st.metric("🚫 Not Allowed", not_allowed, delta=None, delta_color="inverse")
-    with col4:
+    # Metrics - two rows for better mobile stacking
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Total", stats["total_registrations"])
+    with m2:
+        st.metric("✅ Allowed", allowed)
+    with m3:
+        st.metric("🚫 Not Allowed", not_allowed, delta_color="inverse")
+    with m4:
         st.metric("Blocked", stats["blocked_registrations"])
-    with col5:
+    
+    m5, m6, m7, _ = st.columns(4)
+    with m5:
         st.metric("Temp Blocked", stats["temporary_blocked"])
-    with col6:
+    with m6:
         st.metric("Flagged", stats["flagged_registrations"])
-    with col7:
+    with m7:
         st.metric("Avg Spam Score", f"{stats['avg_spam_score']:.1f}")
     
     st.markdown("---")
@@ -159,7 +280,7 @@ def tab_overview():
             title="Distribution of Emails per Phone Number",
             labels={"count": "Number of Emails", "value": "Frequency"}
         )
-        fig1.update_layout(height=400)
+        fig1.update_layout(height=400, margin=dict(l=20, r=20, t=40, b=20))
         st.plotly_chart(fig1, use_container_width=True)
         
         # Chart 2: Spam score distribution
@@ -170,7 +291,7 @@ def tab_overview():
             title="Spam Score Distribution",
             labels={"spam_score": "Spam Score", "count": "Frequency"}
         )
-        fig2.update_layout(height=400)
+        fig2.update_layout(height=400, margin=dict(l=20, r=20, t=40, b=20))
         st.plotly_chart(fig2, use_container_width=True)
         
         # Chart 3: Status breakdown (pie chart) - Use stats data for accuracy
@@ -423,19 +544,19 @@ def tab_manual_review():
     # Display current registration info
     st.markdown("---")
     st.subheader("📊 Current Registration Details")
-    col1, col2, col3 = st.columns(3)
+    detail_col1, detail_col2, detail_col3 = st.columns(3)
     
-    with col1:
+    with detail_col1:
         st.write(f"**Email:** {selected_reg['email']}")
         st.write(f"**Phone:** {selected_reg.get('phone_normalized', 'N/A')}")
         st.write(f"**Status:** {selected_reg['status']}")
     
-    with col2:
+    with detail_col2:
         st.write(f"**Spam Score:** {selected_reg.get('spam_score', 0)}")
         st.write(f"**Is Temporary:** {'Yes' if selected_reg.get('is_temporary') else 'No'}")
         st.write(f"**Is Flagged:** {'Yes' if selected_reg.get('is_flagged') else 'No'}")
     
-    with col3:
+    with detail_col3:
         st.write(f"**Created:** {selected_reg.get('created_at', 'N/A')}")
         st.write(f"**Updated:** {selected_reg.get('updated_at', 'N/A')}")
         if selected_reg.get('detection_notes'):
@@ -516,12 +637,11 @@ def tab_manual_review():
     
     st.markdown("---")
     
-    # Quick actions
+    # Quick actions - 2x2 grid for mobile
     st.subheader("⚡ Quick Actions")
     
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
+    qa1, qa2 = st.columns(2)
+    with qa1:
         if st.button("🚨 Mark as Spam", use_container_width=True):
             if reason and len(reason) >= 5:
                 result = manual_update_registration(
@@ -538,7 +658,7 @@ def tab_manual_review():
             else:
                 st.error("Enter reason first")
     
-    with col2:
+    with qa2:
         if st.button("📧 Mark as Temporary", use_container_width=True):
             if reason and len(reason) >= 5:
                 result = manual_update_registration(
@@ -554,7 +674,8 @@ def tab_manual_review():
             else:
                 st.error("Enter reason first")
     
-    with col3:
+    qa3, qa4 = st.columns(2)
+    with qa3:
         if st.button("✅ Approve", use_container_width=True):
             if reason and len(reason) >= 5:
                 result = manual_update_registration(
@@ -570,7 +691,7 @@ def tab_manual_review():
             else:
                 st.error("Enter reason first")
     
-    with col4:
+    with qa4:
         if st.button("🚫 Block", use_container_width=True):
             if reason and len(reason) >= 5:
                 result = manual_update_registration(
@@ -760,41 +881,67 @@ def tab_phone_registrations():
 
 
 def tab_blocked_registrations():
-    """Blocked registrations tab showing blocked phones and emails."""
+    """Blocked registrations tab showing blocked phones and emails (paginated for speed)."""
     st.header("🚫 Blocked Phone Numbers & Emails")
     
-    # Get all blocked registrations (no pagination)
-    blocked_data = get_blocked_registrations_list(page=1, page_size=10000)
+    # Show one-time success popup if a phone was just whitelisted
+    if "last_whitelist_message" in st.session_state:
+        st.success(st.session_state["last_whitelist_message"])
+        del st.session_state["last_whitelist_message"]
+    
+    # Pagination: small page size so whitelist + rerun is fast (no 10k load)
+    page_size = 50
+    if "blocked_page" not in st.session_state:
+        st.session_state.blocked_page = 1
+    page = st.session_state.blocked_page
+    
+    blocked_data = get_blocked_registrations_list(page=page, page_size=page_size)
     
     if blocked_data and blocked_data.get("items"):
         items = blocked_data["items"]
+        total_regs = blocked_data.get("total", 0)
+        total_pages = blocked_data.get("total_pages", 1)
         
-        # Summary metrics
+        # Summary metrics (total from API; page count for current view)
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Total Blocked Phones", blocked_data.get("total", 0))
+            st.metric("Total Blocked (registrations)", total_regs)
         with col2:
-            total_blocked_emails = sum(item.get("blocked_count", 0) for item in items)
-            st.metric("Total Blocked Emails", total_blocked_emails)
+            st.metric("This page (phone groups)", len(items))
         with col3:
-            total_blocked = sum(item.get("blocked_count", 0) for item in items)
-            st.metric("Blocked Emails", total_blocked)
+            st.metric("Blocked emails on page", sum(item.get("blocked_count", 0) for item in items))
+        
+        # Pagination controls
+        if total_pages > 1:
+            prev_col, info_col, next_col, _ = st.columns([1, 2, 1, 2])
+            with prev_col:
+                if st.button("⬅ Prev", key="blocked_prev", disabled=(page <= 1)):
+                    st.session_state.blocked_page = max(1, page - 1)
+                    st.rerun()
+            with info_col:
+                st.caption(f"Page **{page}** of **{total_pages}**")
+            with next_col:
+                if st.button("Next ➡", key="blocked_next", disabled=(page >= total_pages)):
+                    st.session_state.blocked_page = min(total_pages, page + 1)
+                    st.rerun()
         
         st.markdown("---")
         
-        # Display each blocked phone with its blocked emails
+        # Display each blocked phone with its blocked emails (collapsed by default for faster render)
         for idx, phone_info in enumerate(items):
             with st.expander(
                 f"🚫 {phone_info.get('phone_normalized', 'N/A')} "
                 f"(Hash: {phone_info.get('phone_hash', '')[:16]}...) - "
                 f"{phone_info.get('blocked_count', 0)} blocked email(s)",
-                expanded=True
+                expanded=False
             ):
                 col1, col2 = st.columns([2, 1])
                 with col1:
                     st.write(f"**Phone Hash:** `{phone_info.get('phone_hash', '')}`")
                     st.write(f"**Phone Number:** {phone_info.get('phone_normalized', 'N/A')}")
                     st.write(f"**Blocked Emails Count:** {phone_info.get('blocked_count', 0)}")
+                    if phone_info.get("is_whitelisted"):
+                        st.success("This phone is whitelisted. Suspicious digit patterns will be ignored for future checks.")
                 
                 # Blocked emails table
                 if phone_info.get("blocked_emails"):
@@ -823,10 +970,40 @@ def tab_blocked_registrations():
                             st.write("**Blocking Reasons:**")
                             for note in notes:
                                 st.write(f"- {note}")
+
+                # Admin action: whitelist this phone if it's legitimate
+                if not phone_info.get("is_whitelisted"):
+                    reason_key = f"whitelist_reason_{idx}"
+                    btn_key = f"whitelist_btn_{idx}"
+                    reason_text = st.text_input(
+                        "Reason for allowing this phone",
+                        key=reason_key,
+                        placeholder="Explain why this phone is legitimate (e.g., real user with repeated digits).",
+                    )
+                    if st.button("✅ Allow this phone (whitelist)", key=btn_key, type="primary", use_container_width=True):
+                        if reason_text and len(reason_text.strip()) >= 5:
+                            with st.spinner("Whitelisting phone and approving related registrations. Please wait..."):
+                                result = whitelist_phone(
+                                    phone_hash=phone_info.get("phone_hash", ""),
+                                    phone_normalized=phone_info.get("phone_normalized", "N/A"),
+                                    reason=reason_text.strip(),
+                                )
+                            if result and result.get("success"):
+                                # Store message and reset to page 1 so list refreshes fast
+                                st.session_state["last_whitelist_message"] = result.get(
+                                    "message",
+                                    "Phone whitelisted and related registrations approved from blocked list."
+                                )
+                                st.session_state.blocked_page = 1
+                                st.rerun()
+                            else:
+                                st.error("Failed to whitelist phone. Please try again.")
+                        else:
+                            st.error("Please provide a reason (at least 5 characters).")
         
         # Total info
         st.markdown("---")
-        st.info(f"Total: {blocked_data.get('total', 0)} blocked phone numbers")
+        st.info(f"Total blocked registrations: **{total_regs}**. This page shows up to {page_size} (faster load & whitelist).")
         
         # Export option
         if items:
@@ -1279,17 +1456,122 @@ def tab_reports():
                 )
 
 
+def render_auth_page(cookie_manager=None):
+    """Render modern Sign In / Sign Up page with Google OAuth. Cookie manager persists login across refresh."""
+    api_base = os.getenv("API_BASE_URL", "http://localhost:8000")
+    oauth_providers = get_oauth_providers()
+
+    # Center the auth form
+    st.markdown("<br>", unsafe_allow_html=True)
+    col_left, col_center, col_right = st.columns([1, 2, 1])
+    with col_center:
+        st.markdown("### Welcome to Email Abuse Dashboard")
+        st.markdown("*Sign in or create an account to continue*")
+        st.markdown("---")
+
+        # Tabs: Sign In | Sign Up
+        auth_tab1, auth_tab2 = st.tabs(["**Sign In**", "**Sign Up**"])
+
+        with auth_tab1:
+            # Google OAuth (only if configured)
+            if oauth_providers.get("google"):
+                st.link_button("Sign in with Google", f"{api_base}/auth/google", use_container_width=True, type="secondary")
+                st.markdown("*— or continue with username —*")
+
+            with st.form("signin_form"):
+                sin_user = st.text_input("Username", placeholder="Enter your username", key="sin_user")
+                sin_pass = st.text_input("Password", type="password", placeholder="Enter your password", key="sin_pass")
+                sin_col1, sin_col2 = st.columns(2)
+                with sin_col1:
+                    sin_submit = st.form_submit_button("Sign In")
+                with sin_col2:
+                    demo_btn = st.form_submit_button("Quick Demo")
+
+                if sin_submit and sin_user and sin_pass:
+                    err = login(sin_user, sin_pass, cookie_manager)
+                    if err:
+                        st.error(err)
+                    else:
+                        st.rerun()
+                if demo_btn:
+                    err = login("admin", "adminpass", cookie_manager)
+                    if err:
+                        st.error(err)
+                    else:
+                        st.rerun()
+
+        with auth_tab2:
+            with st.form("signup_form"):
+                st.markdown("**Create Admin Account**")
+                sup_user = st.text_input("Username", placeholder="Choose a username (min 3 chars)", key="sup_user")
+                sup_pass = st.text_input("Password", type="password", placeholder="Choose a password (min 6 chars)", key="sup_pass")
+                sup_pass2 = st.text_input("Confirm Password", type="password", placeholder="Confirm password", key="sup_pass2")
+                sup_admin = st.checkbox("Register as Admin", value=True, help="Admin users can override registrations, bulk block, and manage settings")
+                sup_submit = st.form_submit_button("Create Account")
+
+                if sup_submit:
+                    if not sup_user or len(sup_user) < 3:
+                        st.error("Username must be at least 3 characters")
+                    elif not sup_pass or len(sup_pass) < 6:
+                        st.error("Password must be at least 6 characters")
+                    elif sup_pass != sup_pass2:
+                        st.error("Passwords do not match")
+                    else:
+                        err = signup(sup_user, sup_pass, is_admin=sup_admin, cookie_manager=cookie_manager)
+                        if err:
+                            st.error(err)
+                        else:
+                            st.success("Account created! Signing you in...")
+                            st.rerun()
+        
+        st.markdown("---")
+        st.caption("Make sure the backend is running at http://localhost:8000")
+
+
 def main():
     """Main dashboard application."""
-    # Auto-authenticate with default credentials (no login form needed)
-    if not is_authenticated():
-        # Auto-login with default credentials
-        error = login("admin", "adminpass")
-        if error:
-            st.error(f"Failed to connect to backend: {error}")
-            st.info("Make sure the backend server is running at http://localhost:8000")
-            return
+    # Cookie manager: persist login across browser refresh; logout after 1 day (token expiry)
+    cookie_manager = None
+    try:
+        import extra_streamlit_components as stx
+        cookie_manager = stx.CookieManager()
+    except Exception:
+        pass
+
+    # Restore session from cookie so admin is not logged out on every refresh
+    if restore_session_from_cookie(cookie_manager):
         st.rerun()
+
+    # Check for OAuth callback token in URL
+    try:
+        qp = st.query_params
+        token = qp.get("token") or (qp.get("token", [None])[0] if isinstance(qp.get("token"), list) else None)
+        error_param = qp.get("error") or (qp.get("error", [None])[0] if isinstance(qp.get("error"), list) else None)
+    except AttributeError:
+        try:
+            qp = st.experimental_get_query_params()
+            token = qp.get("token", [None])[0]
+            error_param = qp.get("error", [None])[0]
+        except Exception:
+            token = None
+            error_param = None
+
+    if token and not is_authenticated():
+        if login_with_token(token, cookie_manager):
+            # Clear token from URL
+            try:
+                st.query_params.clear()
+            except (AttributeError, Exception):
+                pass
+            st.rerun()
+
+    if error_param:
+        st.error(f"OAuth error: {error_param}")
+
+    # Show auth page if not authenticated
+    if not is_authenticated():
+        render_auth_page(cookie_manager)
+        return
     
     # Initialize real-time change detection
     if 'last_data_state' not in st.session_state:
@@ -1340,10 +1622,18 @@ def main():
                 # Stats unavailable, still update check time to avoid blocking
                 st.session_state.last_check_time = datetime.now()
     
-    # Main content
-    st.markdown('<div class="main-header">📧 Email Abuse Detection Dashboard</div>', unsafe_allow_html=True)
-    
-    # Real-time updates work silently in the background - no status indicator shown
+    # Header with user info and Logout button
+    header_col1, header_col2, header_col3 = st.columns([2, 1, 1])
+    with header_col1:
+        st.markdown('<div class="main-header">📧 Email Abuse Detection Dashboard</div>', unsafe_allow_html=True)
+    with header_col3:
+        username = st.session_state.get("username", "user")
+        if st.button("Logout", key="logout_btn", use_container_width=True):
+            clear_auth_cookie(cookie_manager)
+            logout(cookie_manager)
+            st.rerun()
+    st.caption(f"Signed in as **{username}**")
+    st.markdown("---")
     
     # Tabs
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
