@@ -12,9 +12,9 @@ import joblib
 import numpy as np
 
 try:
-    import dns.resolver  # type: ignore
+    import dns.resolver as dns_resolver  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
-    dns = None
+    dns_resolver = None
 
 try:
     import phonenumbers  # type: ignore
@@ -31,6 +31,22 @@ PHONE_DEFAULT_REGION = os.getenv("PHONE_DEFAULT_REGION", "IN")
 
 # Disposable email domains (fetched from GitHub)
 DISPOSABLE_DOMAINS: Set[str] = set()
+
+# Allowed top-level domains for email domains.
+# This lets us treat obvious typos like ".cm" as invalid,
+# while still allowing common real TLDs (.com, .org, .gov, etc.).
+ALLOWED_TLDS: Set[str] = {
+    "com",
+    "in",
+    "org",
+    "net",
+    "edu",
+    "gov",
+    "co",
+    "io",
+    "ai",
+    "me",
+}
 
 # Keywords that indicate spam
 SPAM_KEYWORDS = [
@@ -125,11 +141,11 @@ def has_mx_record(domain: str) -> bool:
     if not domain:
         return False
     # If dnspython import failed, don't break registration flow
-    if 'dns' not in globals() or getattr(dns, "resolver", None) is None:
+    if dns_resolver is None:
         logger.warning("dnspython not available; skipping MX validation")
         return True
     try:
-        answers = dns.resolver.resolve(domain, "MX", lifetime=2.0)
+        answers = dns_resolver.resolve(domain, "MX", lifetime=2.0)
         return len(answers) > 0
     except Exception as e:
         logger.info(f"MX lookup failed for {domain}: {e}")
@@ -148,6 +164,17 @@ def is_valid_email_domain(email: str) -> bool:
     domain = email.split("@", 1)[1].strip().lower()
     if not domain:
         return False
+
+    # Basic TLD allow-list: block clearly wrong TLDs like ".cm"
+    # while allowing common real TLDs.
+    # Example: "gmail.cm" -> tld "cm" NOT allowed -> invalid.
+    parts = domain.rsplit(".", 1)
+    if len(parts) != 2:
+        return False
+    tld = parts[1]
+    if tld not in ALLOWED_TLDS:
+        return False
+
     return has_mx_record(domain)
 
 

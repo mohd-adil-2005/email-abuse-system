@@ -1,0 +1,7 @@
+example.js
+*.md
+!README.md
+.git
+.gitignore
+node_modules
+.DS_Store

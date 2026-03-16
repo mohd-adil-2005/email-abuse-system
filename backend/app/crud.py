@@ -6,7 +6,7 @@ from sqlalchemy import func, and_, or_
 from typing import Optional, List, Tuple
 from datetime import datetime
 
-from .models import Registration, User, AuditLog, PhoneOverride
+from .models import Registration, User, AuditLog, PhoneOverride, SystemSetting
 from .utils import (
     is_temporary_email,
     calculate_spam_score,
@@ -144,6 +144,26 @@ def get_flagged_registrations(
     total = query.count()
     items = query.order_by(Registration.created_at.desc()).offset(skip).limit(limit).all()
     return items, total
+
+
+# System settings CRUD
+def get_setting(db: Session, key: str, default: Optional[str] = None) -> str:
+    """Get a simple key/value setting."""
+    setting = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+    if setting is None:
+        return default
+    return setting.value
+
+
+def set_setting(db: Session, key: str, value: str) -> None:
+    """Set or update a simple key/value setting."""
+    setting = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+    if setting:
+        setting.value = value
+    else:
+        setting = SystemSetting(key=key, value=value)
+        db.add(setting)
+    db.commit()
 
 
 def update_registration_status(

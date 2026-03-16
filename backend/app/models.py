@@ -78,3 +78,11 @@ class PhoneOverride(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
+class SystemSetting(Base):
+    """Key/value settings for configurable limits and options."""
+    __tablename__ = "system_settings"
+
+    key = Column(String(100), primary_key=True)
+    value = Column(String(255), nullable=False)
+
+

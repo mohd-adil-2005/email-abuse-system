@@ -1,0 +1,38 @@
+{
+  "name": "@mohd-adil-2005/email-abuse-client",
+  "version": "1.0.0",
+  "description": "JavaScript client for the Email Abuse Detection System API — validate email and phone at signup, block temp emails and abuse",
+  "main": "index.js",
+  "scripts": {
+    "test": "node -e \"console.log('Run your API and test with: node example.js')\""
+  },
+  "keywords": [
+    "email",
+    "abuse",
+    "detection",
+    "signup",
+    "validation",
+    "middleware",
+    "temp-email",
+    "spam",
+    "phone-validation",
+    "fraud-prevention"
+  ],
+  "author": "Mohd Adil",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mohd-adil-2005/email-abuse-system.git",
+    "directory": "email-abuse-client"
+  },
+  "homepage": "https://github.com/mohd-adil-2005/email-abuse-system#readme",
+  "bugs": {
+    "url": "https://github.com/mohd-adil-2005/email-abuse-system/issues"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+}

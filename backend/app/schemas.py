@@ -238,3 +238,8 @@ class PhoneWhitelistResponse(BaseModel):
     updated_registrations: int
     message: str
 
+
+class PhoneLimitSetting(BaseModel):
+    """Configurable limit for registrations per phone number."""
+    max_registrations_per_phone: int = Field(..., ge=1, le=100)
+

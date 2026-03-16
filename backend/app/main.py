@@ -25,7 +25,7 @@ from .schemas import (
     BulkBlockRequest, BulkBlockResponse, AuditLogResponse, AuditLogListResponse,
     APIKeyResponse, ManualUpdateRequest, ManualUpdateResponse,
     BulkRegistrationRequest, BulkRegistrationResponse, BulkRegistrationResult,
-    PhoneWhitelistRequest, PhoneWhitelistResponse,
+    PhoneWhitelistRequest, PhoneWhitelistResponse, PhoneLimitSetting,
 )
 from .crud import (
     get_registration_by_email, get_registration_by_id, create_registration, get_registrations,
@@ -34,7 +34,7 @@ from .crud import (
     create_audit_log, get_audit_logs, count_registrations_by_phone,
     hash_phone, normalize_phone, get_phone_registrations, get_blocked_registrations,
     generate_api_key, update_registration_flags, get_or_create_oauth_user,
-    create_or_update_phone_override,
+    create_or_update_phone_override, get_setting, set_setting,
 )
 from .auth import verify_password, get_password_hash, create_access_token
 from .dependencies import get_current_user, get_current_admin_user, get_current_user_or_api_key, limiter
@@ -111,7 +111,7 @@ def check_registration(
     Check if a registration is allowed.
     
     Rules:
-    - Max 3 registrations per phone number
+    - Max N registrations per phone number (configurable setting)
     - Temporary emails are blocked
     - High spam score (>50) or suspicious phone patterns block the registration
     """
@@ -134,16 +134,22 @@ def check_registration(
             registration_id=existing.id
         )
     
-    # Check phone limit (max 3)
+    # Check phone limit (configurable, default 3)
+    max_reg_str = get_setting(db, "MAX_REGISTRATIONS_PER_PHONE", "3")
+    try:
+        max_reg = int(max_reg_str)
+    except (TypeError, ValueError):
+        max_reg = 3
+
     count = count_registrations_by_phone(db, phone_hash_value)
-    if count >= 3:
+    if count >= max_reg:
         # Create registration even if blocked to log it in dashboard
         registration = create_registration(
             db=db,
             email=registration_data.email,
             phone=registration_data.phone,
             status="blocked",
-            detection_notes="Phone number limit exceeded (max 3 registrations)"
+            detection_notes=f"Phone number limit exceeded (max {max_reg} registrations)"
         )
         
         return RegistrationCheckResponse(
@@ -155,7 +161,7 @@ def check_registration(
             spam_score=registration.spam_score,
             is_flagged=registration.is_flagged,
             detection_notes=registration.detection_notes,
-            message="Maximum registrations (3) reached for this phone number",
+            message=f"Maximum registrations ({max_reg}) reached for this phone number",
             registration_id=registration.id
         )
     
@@ -164,7 +170,7 @@ def check_registration(
         db=db,
         email=registration_data.email,
         phone=registration_data.phone,
-        status="approved" if count < 3 else "pending"
+        status="approved" if count < max_reg else "pending"
     )
     
     allowed = registration.status != "blocked"
@@ -1310,6 +1316,39 @@ async def whitelist_phone_number(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to whitelist phone: {str(e)}",
         )
+
+
+@app.get("/settings/phone-limit", response_model=PhoneLimitSetting)
+async def get_phone_limit_setting(
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Get current max registrations allowed per phone number (admin only)."""
+    max_reg_str = get_setting(db, "MAX_REGISTRATIONS_PER_PHONE", "3")
+    try:
+        max_reg = int(max_reg_str)
+    except (TypeError, ValueError):
+        max_reg = 3
+    return PhoneLimitSetting(max_registrations_per_phone=max_reg)
+
+
+@app.post("/settings/phone-limit", response_model=PhoneLimitSetting)
+async def update_phone_limit_setting(
+    data: PhoneLimitSetting,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Update max registrations allowed per phone number (admin only)."""
+    set_setting(db, "MAX_REGISTRATIONS_PER_PHONE", str(data.max_registrations_per_phone))
+    create_audit_log(
+        db=db,
+        user_id=current_user.id,
+        action="update_phone_limit",
+        details={
+            "max_registrations_per_phone": data.max_registrations_per_phone,
+        },
+    )
+    return data
 
 
 # Health check

@@ -15,6 +15,7 @@ import io
 import os
 import time
 import json
+import requests
 
 from utils import (
     login, signup, logout, is_authenticated, login_with_token, get_oauth_providers,
@@ -1636,14 +1637,15 @@ def main():
     st.markdown("---")
     
     # Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📊 Overview",
         "📋 Registrations",
         "📱 Phone Numbers",
         "🚫 Blocked",
         "🔍 Manual Review",
         "🚨 Spam Detection",
-        "📄 Reports"
+        "📄 Reports",
+        "⚙️ Settings",
     ])
     
     with tab1:
@@ -1666,6 +1668,46 @@ def main():
     
     with tab7:
         tab_reports()
+    
+    # Settings tab - admin controls
+    with tab8:
+        st.header("⚙️ Settings")
+        st.subheader("Phone limit per number")
+
+        api_base = st.session_state.get("api_base_url", "http://localhost:8000")
+        token = st.session_state.get("access_token")
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+        current_limit = 3
+        try:
+            resp = requests.get(f"{api_base}/settings/phone-limit", headers=headers, timeout=5)
+            if resp.status_code == 200:
+                current_limit = int(resp.json().get("max_registrations_per_phone", 3))
+        except Exception:
+            pass
+
+        new_limit = st.number_input(
+            "Max registrations allowed per phone number",
+            min_value=1,
+            max_value=100,
+            value=int(current_limit),
+            step=1,
+        )
+
+        if st.button("Save phone limit"):
+            try:
+                r = requests.post(
+                    f"{api_base}/settings/phone-limit",
+                    headers={**headers, "Content-Type": "application/json"},
+                    json={"max_registrations_per_phone": int(new_limit)},
+                    timeout=5,
+                )
+                if r.status_code == 200:
+                    st.success("Phone limit updated successfully.")
+                else:
+                    st.error(f"Failed to update limit: {r.text}")
+            except Exception as e:
+                st.error(f"Error while saving phone limit: {e}")
 
 
 if __name__ == "__main__":
