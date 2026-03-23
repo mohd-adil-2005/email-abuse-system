@@ -6,7 +6,9 @@ import hashlib
 import os
 import requests
 import math
-from typing import List, Set, Tuple
+import time
+import threading
+from typing import Dict, List, Set, Tuple
 import logging
 import joblib
 import numpy as np
@@ -31,6 +33,39 @@ PHONE_DEFAULT_REGION = os.getenv("PHONE_DEFAULT_REGION", "IN")
 
 # Disposable email domains (fetched from GitHub)
 DISPOSABLE_DOMAINS: Set[str] = set()
+
+# MX lookup cache (per worker process):
+# avoids repeated DNS calls for the same domain under load.
+MX_CACHE_TTL_SECONDS = int(os.getenv("MX_CACHE_TTL_SECONDS", "600"))  # default 10 min
+MX_CACHE_MAX_SIZE = int(os.getenv("MX_CACHE_MAX_SIZE", "10000"))
+MX_DNS_TIMEOUT_SECONDS = float(os.getenv("MX_DNS_TIMEOUT_SECONDS", "2.0"))
+_MX_CACHE: Dict[str, Tuple[float, bool]] = {}
+_MX_CACHE_LOCK = threading.Lock()
+
+
+def _mx_cache_get(domain: str) -> bool | None:
+    """Return cached MX result if fresh, else None."""
+    now = time.time()
+    with _MX_CACHE_LOCK:
+        cached = _MX_CACHE.get(domain)
+        if not cached:
+            return None
+        expires_at, value = cached
+        if expires_at <= now:
+            _MX_CACHE.pop(domain, None)
+            return None
+        return value
+
+
+def _mx_cache_set(domain: str, value: bool) -> None:
+    """Set MX cache entry and prune oldest if cache grows too large."""
+    expires_at = time.time() + max(1, MX_CACHE_TTL_SECONDS)
+    with _MX_CACHE_LOCK:
+        _MX_CACHE[domain] = (expires_at, value)
+        if len(_MX_CACHE) > max(100, MX_CACHE_MAX_SIZE):
+            # Remove an arbitrary oldest item (dict preserves insertion order in modern Python).
+            oldest_key = next(iter(_MX_CACHE))
+            _MX_CACHE.pop(oldest_key, None)
 
 # Allowed top-level domains for email domains.
 # This lets us treat obvious typos like ".cm" as invalid,
@@ -144,11 +179,19 @@ def has_mx_record(domain: str) -> bool:
     if dns_resolver is None:
         logger.warning("dnspython not available; skipping MX validation")
         return True
+
+    cached = _mx_cache_get(domain)
+    if cached is not None:
+        return cached
+
     try:
-        answers = dns_resolver.resolve(domain, "MX", lifetime=2.0)
-        return len(answers) > 0
+        answers = dns_resolver.resolve(domain, "MX", lifetime=MX_DNS_TIMEOUT_SECONDS)
+        has_records = len(answers) > 0
+        _mx_cache_set(domain, has_records)
+        return has_records
     except Exception as e:
         logger.info(f"MX lookup failed for {domain}: {e}")
+        _mx_cache_set(domain, False)
         return False
 
 

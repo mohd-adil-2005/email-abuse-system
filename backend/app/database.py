@@ -9,12 +9,13 @@ from dotenv import load_dotenv
 
 # Load .env from backend folder (ensures OAuth credentials are found)
 _backend_dir = Path(__file__).resolve().parent.parent
-load_dotenv(_backend_dir / ".env.example")  # Load first (template/fallback)
-load_dotenv(_backend_dir / ".env")          # Then .env overrides (user secrets)
-load_dotenv()  # Also try cwd for flexibility
+load_dotenv(_backend_dir / ".env.example", override=False)  # Template/fallback values
+load_dotenv(_backend_dir / ".env", override=True)           # Real local secrets/config
+load_dotenv(override=True)  # Also try cwd and allow explicit env overrides
 
 # Database URL from environment
-# Use SQLite for easier local setup without PostgreSQL
+# Use DATABASE_URL for selecting backend DB (SQLite or PostgreSQL).
+# For production/deployment, set DATABASE_URL to PostgreSQL.
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "sqlite:///./email_abuse.db"  # Changed to SQLite for easier setup

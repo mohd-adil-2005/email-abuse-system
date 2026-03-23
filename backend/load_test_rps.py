@@ -1,6 +1,7 @@
 import threading
 import time
 import random
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -46,14 +47,24 @@ def main() -> None:
             statuses.append(f.result())
 
     duration = time.perf_counter() - start
-    success = sum(1 for s in statuses if s is not None and 200 <= s < 500)
-    failed = TOTAL_REQUESTS - success
+    status_counts = Counter(statuses)
+    ok_2xx = sum(count for status, count in status_counts.items() if isinstance(status, int) and 200 <= status < 300)
+    client_4xx = sum(count for status, count in status_counts.items() if isinstance(status, int) and 400 <= status < 500)
+    server_5xx = sum(count for status, count in status_counts.items() if isinstance(status, int) and 500 <= status < 600)
+    errored = status_counts.get(None, 0)
     rps = TOTAL_REQUESTS / duration if duration > 0 else 0.0
 
     print(f"\nCompleted in {duration:.2f} seconds")
     print(f"Approx RPS: {rps:.1f}")
-    print(f"Successful responses: {success}")
-    print(f"Failed/errored requests: {failed}")
+    print(f"2xx responses (true success): {ok_2xx}")
+    print(f"4xx responses: {client_4xx}")
+    print(f"5xx responses: {server_5xx}")
+    print(f"Errored requests: {errored}")
+    if status_counts:
+        print("Status breakdown:")
+        for status, count in sorted(status_counts.items(), key=lambda kv: (999 if kv[0] is None else kv[0])):
+            label = "None(error)" if status is None else str(status)
+            print(f"  {label}: {count}")
 
 
 if __name__ == "__main__":

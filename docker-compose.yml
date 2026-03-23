@@ -7,11 +7,18 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=sqlite:///./db/email_abuse.db
+      # Production: set DATABASE_URL in your deployment environment.
+      # Local fallback keeps current docker-compose behavior with db service.
+      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg2://postgres:postgres@db:5432/email_abuse}
+      # Worker tuning: auto by CPU cores (clamped by MIN/MAX).
+      # To force a fixed value, set WEB_CONCURRENCY in your env.
+      - MIN_WORKERS=${MIN_WORKERS:-2}
+      - MAX_WORKERS=${MAX_WORKERS:-8}
       - BACKEND_BASE_URL=http://localhost:8000
       - FRONTEND_URL=http://localhost:8501
-    volumes:
-      - backend_data:/app/db
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:
@@ -27,5 +34,23 @@ services:
       - backend
     restart: unless-stopped
 
+  db:
+    image: postgres:16
+    container_name: email-abuse-db
+    environment:
+      - POSTGRES_DB=email_abuse
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d email_abuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
 volumes:
-  backend_data:
+  postgres_data:
