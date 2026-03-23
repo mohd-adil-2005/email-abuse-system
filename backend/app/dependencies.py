@@ -15,6 +15,8 @@ from .auth import decode_access_token
 
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+# Optional OAuth2 scheme for endpoints that accept API key OR JWT.
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="login", auto_error=False)
 
 # API Key scheme
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -87,7 +89,7 @@ def get_user_by_api_key(
 
 
 def get_current_user_or_api_key(
-    token: Optional[str] = Depends(oauth2_scheme),
+    token: Optional[str] = Depends(oauth2_scheme_optional),
     api_key: Optional[str] = Depends(api_key_header),
     db: Session = Depends(get_db)
 ) -> User:

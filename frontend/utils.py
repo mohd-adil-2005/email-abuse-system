@@ -395,6 +395,38 @@ def generate_api_key() -> Optional[Dict]:
         return None
 
 
+def get_my_api_key() -> Optional[Dict]:
+    """Get existing API key for current user (JWT auth required)."""
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/my-api-key",
+            headers=get_auth_headers(),
+            timeout=10
+        )
+        if response.status_code == 200:
+            return response.json()
+        if response.status_code == 404:
+            # Normal state for new users who have not generated a key yet.
+            return {"api_key": None, "message": "No API key found yet."}
+        if response.status_code == 401:
+            if "access_token" in st.session_state:
+                del st.session_state.access_token
+            if "username" in st.session_state:
+                del st.session_state.username
+            st.error("Session expired. Please login again.")
+            st.rerun()
+            return None
+        try:
+            error_detail = response.json().get("detail", response.text)
+        except Exception:
+            error_detail = response.text
+        st.error(f"API Error: {response.status_code} - {error_detail}")
+        return None
+    except Exception as e:
+        st.error(f"Error fetching API key: {str(e)}")
+        return None
+
+
 def manual_update_registration(
     registration_id: int,
     is_temporary: Optional[bool] = None,

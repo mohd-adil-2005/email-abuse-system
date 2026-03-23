@@ -22,7 +22,7 @@ from utils import (
     get_stats, get_registrations, get_flagged_registrations, override_registration,
     bulk_block_registrations, get_audit_logs, get_phone_registrations,
     get_blocked_registrations_list, check_registration, manual_update_registration,
-    get_model_info, whitelist_phone,
+    get_model_info, whitelist_phone, generate_api_key, get_my_api_key,
     restore_session_from_cookie, save_auth_cookie, clear_auth_cookie,
 )
 
@@ -1457,6 +1457,169 @@ def tab_reports():
                 )
 
 
+def tab_developer_docs():
+    """Developer docs tab for middleware/API integration."""
+    st.header("🧑‍💻 Developer Docs")
+    st.markdown(
+        "Integrate this project as a middleware API in any signup flow. "
+        "Call the API before creating an account in your app."
+    )
+
+    st.subheader("Quick Integration Flow (Postman JSON style)")
+    st.markdown(
+        "1. Login and get JWT token (`/login`)\n"
+        "2. Generate API key using JWT (`/generate-api-key`)\n"
+        "3. Call protected middleware endpoint (`/v1/check_registration`) with `X-API-Key`\n"
+        "4. If `allowed=true` continue signup, else block and show message"
+    )
+
+    st.subheader("Step 1: Login (JWT) - Postman")
+    st.markdown("Method: `POST` | URL: `http://localhost:8000/login`")
+    st.code(
+        """{
+  "username": "admin",
+  "password": "adminpass"
+}""",
+        language="json",
+    )
+    st.caption("Headers: Content-Type = application/json")
+
+    st.subheader("Step 2: Generate API Key - Postman")
+    st.markdown("Method: `POST` | URL: `http://localhost:8000/generate-api-key`")
+    st.code("Authorization: Bearer <ACCESS_TOKEN>", language="text")
+
+    st.subheader("Step 3: Protected Registration Check - Postman")
+    st.markdown("Method: `POST` | URL: `http://localhost:8000/v1/check_registration`")
+    st.code("X-API-Key: <YOUR_API_KEY>\nContent-Type: application/json", language="text")
+    st.code(
+        """{
+  "email": "user@example.com",
+  "phone": "+919876543210"
+}""",
+        language="json",
+    )
+
+    st.subheader("Public vs Protected Endpoints")
+    endpoint_df = pd.DataFrame([
+        {"Endpoint": "/check_registration", "Auth": "No", "Use case": "Demo/local quick testing"},
+        {"Endpoint": "/v1/check_registration", "Auth": "X-API-Key or JWT", "Use case": "Organization integration (recommended)"},
+        {"Endpoint": "/generate-api-key", "Auth": "JWT", "Use case": "Create integration key"},
+        {"Endpoint": "/health/db", "Auth": "No", "Use case": "DB readiness check"},
+    ])
+    st.dataframe(endpoint_df, use_container_width=True, hide_index=True)
+
+    st.info(
+        "Production tip: Store API keys in secure secret managers. "
+        "Do not hardcode keys in frontend code or public repos."
+    )
+
+
+def tab_api_access():
+    """Dedicated API access page with key management and integration docs."""
+    st.header("🔐 API Access")
+    st.markdown("Generate/view API keys and copy ready-to-use Postman + signup integration examples.")
+
+    def _sync_api_key_display(api_key: str) -> None:
+        """Keep displayed input value in sync with latest loaded/generated key."""
+        st.session_state["latest_generated_api_key"] = api_key
+        st.session_state["api_tab_key_display"] = api_key
+
+    st.subheader("API Key Management")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🔑 Generate New API Key", use_container_width=True, key="api_tab_generate_key"):
+            result = generate_api_key()
+            if result and result.get("api_key"):
+                _sync_api_key_display(result["api_key"])
+                st.success("New API key generated and saved on server.")
+            else:
+                st.error("Could not generate API key.")
+    with c2:
+        if st.button("👁️ Show My Saved API Key", use_container_width=True, key="api_tab_show_key"):
+            result = get_my_api_key()
+            if result and result.get("api_key"):
+                _sync_api_key_display(result["api_key"])
+                st.success("Existing API key loaded from backend.")
+            else:
+                st.warning("No API key found yet. Click 'Generate New API Key'.")
+
+    # Auto-load saved key once per session so users can see key again after re-login.
+    if "api_key_loaded_once" not in st.session_state:
+        auto_result = get_my_api_key()
+        if auto_result and auto_result.get("api_key"):
+            _sync_api_key_display(auto_result["api_key"])
+        st.session_state["api_key_loaded_once"] = True
+
+    if "api_tab_key_display" not in st.session_state:
+        st.session_state["api_tab_key_display"] = st.session_state.get("latest_generated_api_key", "")
+    st.text_input("Your API Key", key="api_tab_key_display")
+
+    st.markdown("---")
+    st.subheader("Postman Setup (Step by Step)")
+    st.markdown("### Step 1: Login (get JWT)")
+    st.code(
+        """POST http://localhost:8000/login
+Content-Type: application/json
+
+{
+  "username": "admin",
+  "password": "adminpass"
+}""",
+        language="http",
+    )
+    st.caption("Copy `access_token` from response.")
+
+    st.markdown("### Step 2: Generate API Key")
+    st.code(
+        """POST http://localhost:8000/generate-api-key
+Authorization: Bearer <ACCESS_TOKEN>""",
+        language="http",
+    )
+    st.caption("Copy `api_key` (starts with `sk_...`).")
+
+    st.markdown("### Step 3: Protected Registration Check")
+    st.code(
+        """POST http://localhost:8000/v1/check_registration
+Content-Type: application/json
+X-API-Key: <YOUR_API_KEY>
+
+{
+  "email": "testuser@example.com",
+  "phone": "+919876543210"
+}""",
+        language="http",
+    )
+    st.caption("If allowed=true, continue signup in your app.")
+
+    st.markdown("---")
+    st.subheader("Signup Page Integration (Backend)")
+    st.markdown("Use this middleware call before creating account in your system:")
+    st.code(
+        """import requests
+
+API_URL = "http://localhost:8000/v1/check_registration"
+API_KEY = "sk_your_api_key"
+
+def check_before_signup(email: str, phone: str):
+    headers = {
+        "Content-Type": "application/json",
+        "X-API-Key": API_KEY,
+    }
+    payload = {"email": email, "phone": phone}
+    resp = requests.post(API_URL, json=payload, headers=headers, timeout=10)
+    data = resp.json()
+    return data
+
+# Example inside signup flow:
+# result = check_before_signup(user_email, user_phone)
+# if not result.get("allowed"):
+#     return {"ok": False, "message": result.get("message")}
+# else create user account""",
+        language="python",
+    )
+    st.caption("Short description: your signup backend calls middleware first, then decides allow/block.")
+
+
 def render_auth_page(cookie_manager=None):
     """Render modern Sign In / Sign Up page with Google OAuth. Cookie manager persists login across refresh."""
     api_base = os.getenv("API_BASE_URL", "http://localhost:8000")
@@ -1623,21 +1786,37 @@ def main():
                 # Stats unavailable, still update check time to avoid blocking
                 st.session_state.last_check_time = datetime.now()
     
-    # Header with user info and Logout button
+    # Header with user info and profile popup
     header_col1, header_col2, header_col3 = st.columns([2, 1, 1])
     with header_col1:
         st.markdown('<div class="main-header">📧 Email Abuse Detection Dashboard</div>', unsafe_allow_html=True)
     with header_col3:
         username = st.session_state.get("username", "user")
-        if st.button("Logout", key="logout_btn", use_container_width=True):
-            clear_auth_cookie(cookie_manager)
-            logout(cookie_manager)
-            st.rerun()
+        with st.popover("👤 Profile", use_container_width=True):
+            st.markdown(f"**Signed in as:** `{username}`")
+            st.caption("Use this panel for API key and account actions.")
+
+            if st.button("🔑 Generate API Key", key="profile_generate_key", use_container_width=True):
+                result = generate_api_key()
+                if result and result.get("api_key"):
+                    st.session_state["latest_generated_api_key"] = result["api_key"]
+                    st.success("API key generated. Copy it now - store it securely.")
+                else:
+                    st.error("Failed to generate API key.")
+
+            latest_key = st.session_state.get("latest_generated_api_key")
+            if latest_key:
+                st.text_input("Latest API Key", value=latest_key, disabled=False, key="latest_api_key_display")
+
+            if st.button("🚪 Logout", key="logout_btn", use_container_width=True):
+                clear_auth_cookie(cookie_manager)
+                logout(cookie_manager)
+                st.rerun()
     st.caption(f"Signed in as **{username}**")
     st.markdown("---")
     
     # Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
         "📊 Overview",
         "📋 Registrations",
         "📱 Phone Numbers",
@@ -1646,6 +1825,8 @@ def main():
         "🚨 Spam Detection",
         "📄 Reports",
         "⚙️ Settings",
+        "🧑‍💻 Developer",
+        "🔐 API Access",
     ])
     
     with tab1:
@@ -1708,6 +1889,12 @@ def main():
                     st.error(f"Failed to update limit: {r.text}")
             except Exception as e:
                 st.error(f"Error while saving phone limit: {e}")
+
+    with tab9:
+        tab_developer_docs()
+
+    with tab10:
+        tab_api_access()
 
 
 if __name__ == "__main__":

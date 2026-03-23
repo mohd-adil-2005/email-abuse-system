@@ -5,6 +5,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -57,10 +58,19 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Runtime settings (safe defaults for local dev)
+CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", "*")
+CORS_ORIGINS = ["*"] if CORS_ORIGINS_RAW.strip() == "*" else [
+    origin.strip() for origin in CORS_ORIGINS_RAW.split(",") if origin.strip()
+]
+SEED_DEFAULT_ADMIN = os.getenv("SEED_DEFAULT_ADMIN", "true").lower() == "true"
+DEFAULT_ADMIN_USERNAME = os.getenv("DEFAULT_ADMIN_USERNAME", "admin")
+DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "adminpass")
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -84,29 +94,26 @@ async def startup_event():
     else:
         print("OAuth: Google not configured (set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET in backend/.env)")
     
-    # Seed admin user if not exists
+    # Seed admin user if enabled
     db = next(get_db())
-    admin_user = get_user_by_username(db, "admin")
-    if not admin_user:
-        admin_user = User(
-            username="admin",
-            hashed_password=get_password_hash("adminpass"),
-            is_admin=True
-        )
-        db.add(admin_user)
-        db.commit()
-        print("Created default admin user: admin/adminpass")
+    if SEED_DEFAULT_ADMIN:
+        admin_user = get_user_by_username(db, DEFAULT_ADMIN_USERNAME)
+        if not admin_user:
+            admin_user = User(
+                username=DEFAULT_ADMIN_USERNAME,
+                hashed_password=get_password_hash(DEFAULT_ADMIN_PASSWORD),
+                is_admin=True
+            )
+            db.add(admin_user)
+            db.commit()
+            print(f"Created default admin user: {DEFAULT_ADMIN_USERNAME}/<hidden>")
+    else:
+        print("Default admin seeding disabled (SEED_DEFAULT_ADMIN=false)")
     db.close()
 
 
 # Public endpoints
-@app.post("/check_registration", response_model=RegistrationCheckResponse)
-@limiter.limit("10000/minute")  # High limit for throughput (89+ RPS)
-def check_registration(
-    request: Request,
-    registration_data: RegistrationCheckRequest,
-    db: Session = Depends(get_db)
-):
+def _check_registration_logic(registration_data: RegistrationCheckRequest, db: Session) -> RegistrationCheckResponse:
     """
     Check if a registration is allowed.
     
@@ -192,6 +199,29 @@ def check_registration(
         message=message,
         registration_id=registration.id
     )
+
+
+@app.post("/check_registration", response_model=RegistrationCheckResponse)
+@limiter.limit("10000/minute")  # Public/demo endpoint
+def check_registration(
+    request: Request,
+    registration_data: RegistrationCheckRequest,
+    db: Session = Depends(get_db)
+):
+    """Public endpoint for registration checks (demo/local usage)."""
+    return _check_registration_logic(registration_data, db)
+
+
+@app.post("/v1/check_registration", response_model=RegistrationCheckResponse)
+@limiter.limit("300/minute")  # API key/JWT endpoint (free-tier style default)
+def check_registration_v1(
+    request: Request,
+    registration_data: RegistrationCheckRequest,
+    current_user: User = Depends(get_current_user_or_api_key),
+    db: Session = Depends(get_db)
+):
+    """Protected middleware endpoint for company integrations via API key/JWT."""
+    return _check_registration_logic(registration_data, db)
 
 
 # Authentication
@@ -1189,6 +1219,24 @@ async def generate_api_key_endpoint(
         )
 
 
+@app.get("/my-api-key", response_model=APIKeyResponse)
+async def get_my_api_key_endpoint(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Return existing API key for current user (JWT required)."""
+    user = db.query(User).filter(User.id == current_user.id).first()
+    if not user or not user.api_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API key not found. Generate one first."
+        )
+    return APIKeyResponse(
+        api_key=user.api_key,
+        message="Existing API key returned successfully."
+    )
+
+
 @app.get("/phone-registrations")
 async def get_phone_registrations_endpoint(
     page: int = 1,
@@ -1356,6 +1404,16 @@ async def update_phone_limit_setting(
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+@app.get("/health/db")
+async def health_db(db: Session = Depends(get_db)):
+    """DB connectivity health check (readiness)."""
+    try:
+        db.execute(text("SELECT 1"))
+        return {"status": "healthy", "database": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {str(e)}")
 
 
 # Model info (for academic demo - shows training data size)
