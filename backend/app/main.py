@@ -17,7 +17,7 @@ import json
 import xml.etree.ElementTree as ET
 import io
 
-from .database import engine, get_db
+from .database import engine, get_db, ensure_multi_tenant_columns
 from .models import Base, User, Registration
 from .schemas import (
     RegistrationCheckRequest, RegistrationCheckResponse, RegistrationResponse,
@@ -36,6 +36,7 @@ from .crud import (
     hash_phone, normalize_phone, get_phone_registrations, get_blocked_registrations,
     generate_api_key, update_registration_flags, get_or_create_oauth_user,
     create_or_update_phone_override, get_setting, set_setting,
+    resolve_organization_id, is_main_admin,
 )
 from .auth import verify_password, get_password_hash, create_access_token
 from .dependencies import get_current_user, get_current_admin_user, get_current_user_or_api_key, limiter
@@ -50,6 +51,7 @@ from .oauth import (
 
 # Create tables
 Base.metadata.create_all(bind=engine)
+ensure_multi_tenant_columns()
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -102,18 +104,26 @@ async def startup_event():
             admin_user = User(
                 username=DEFAULT_ADMIN_USERNAME,
                 hashed_password=get_password_hash(DEFAULT_ADMIN_PASSWORD),
-                is_admin=True
+                is_admin=True,
+                organization_id=resolve_organization_id(DEFAULT_ADMIN_USERNAME, is_admin=True),
             )
             db.add(admin_user)
             db.commit()
             print(f"Created default admin user: {DEFAULT_ADMIN_USERNAME}/<hidden>")
+        elif not admin_user.organization_id:
+            admin_user.organization_id = resolve_organization_id(DEFAULT_ADMIN_USERNAME, is_admin=True)
+            db.commit()
     else:
         print("Default admin seeding disabled (SEED_DEFAULT_ADMIN=false)")
     db.close()
 
 
 # Public endpoints
-def _check_registration_logic(registration_data: RegistrationCheckRequest, db: Session) -> RegistrationCheckResponse:
+def _check_registration_logic(
+    registration_data: RegistrationCheckRequest,
+    db: Session,
+    current_user: Optional[User] = None,
+) -> RegistrationCheckResponse:
     """
     Check if a registration is allowed.
     
@@ -126,7 +136,7 @@ def _check_registration_logic(registration_data: RegistrationCheckRequest, db: S
     phone_hash_value = hash_phone(phone_normalized)
     
     # Check if email already exists
-    existing = get_registration_by_email(db, registration_data.email)
+    existing = get_registration_by_email(db, registration_data.email, current_user=current_user)
     if existing:
         return RegistrationCheckResponse(
             allowed=False,
@@ -148,7 +158,7 @@ def _check_registration_logic(registration_data: RegistrationCheckRequest, db: S
     except (TypeError, ValueError):
         max_reg = 3
 
-    count = count_registrations_by_phone(db, phone_hash_value)
+    count = count_registrations_by_phone(db, phone_hash_value, current_user=current_user)
     if count >= max_reg:
         # Create registration even if blocked to log it in dashboard
         registration = create_registration(
@@ -156,7 +166,9 @@ def _check_registration_logic(registration_data: RegistrationCheckRequest, db: S
             email=registration_data.email,
             phone=registration_data.phone,
             status="blocked",
-            detection_notes=f"Phone number limit exceeded (max {max_reg} registrations)"
+            detection_notes=f"Phone number limit exceeded (max {max_reg} registrations)",
+            owner_user_id=current_user.id if current_user else None,
+            organization_id=current_user.organization_id if current_user else None,
         )
         
         return RegistrationCheckResponse(
@@ -177,7 +189,9 @@ def _check_registration_logic(registration_data: RegistrationCheckRequest, db: S
         db=db,
         email=registration_data.email,
         phone=registration_data.phone,
-        status="approved" if count < max_reg else "pending"
+        status="approved" if count < max_reg else "pending",
+        owner_user_id=current_user.id if current_user else None,
+        organization_id=current_user.organization_id if current_user else None,
     )
     
     allowed = registration.status != "blocked"
@@ -209,7 +223,7 @@ def check_registration(
     db: Session = Depends(get_db)
 ):
     """Public endpoint for registration checks (demo/local usage)."""
-    return _check_registration_logic(registration_data, db)
+    return _check_registration_logic(registration_data, db, current_user=None)
 
 
 @app.post("/v1/check_registration", response_model=RegistrationCheckResponse)
@@ -221,7 +235,7 @@ def check_registration_v1(
     db: Session = Depends(get_db)
 ):
     """Protected middleware endpoint for company integrations via API key/JWT."""
-    return _check_registration_logic(registration_data, db)
+    return _check_registration_logic(registration_data, db, current_user=current_user)
 
 
 # Authentication
@@ -270,6 +284,7 @@ async def signup(
             username=signup_data.username,
             hashed_password=hashed,
             is_admin=bool(signup_data.is_admin),
+            organization_id=resolve_organization_id(signup_data.username, bool(signup_data.is_admin)),
         )
         access_token = create_access_token(data={"sub": user.username})
         return TokenResponse(access_token=access_token)
@@ -364,7 +379,8 @@ async def list_registrations(
             skip=skip,
             limit=page_size,
             phone_hash=phone_hash,
-            status=status
+            status=status,
+            current_user=current_user,
         )
         
         total_pages = (total + page_size - 1) // page_size if page_size > 0 else 0
@@ -404,7 +420,7 @@ async def override_registration(
 ):
     """Override registration status (admin only)."""
     # Get existing registration to capture old status
-    existing_reg = get_registration_by_id(db, override_data.registration_id)
+    existing_reg = get_registration_by_id(db, override_data.registration_id, current_user=current_user)
     if not existing_reg:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -417,7 +433,8 @@ async def override_registration(
         db=db,
         registration_id=override_data.registration_id,
         status=override_data.status,
-        detection_notes=f"Manual override by {current_user.username}: {override_data.reason}"
+        detection_notes=f"Manual override by {current_user.username}: {override_data.reason}",
+        current_user=current_user,
     )
     
     # Create audit log
@@ -447,7 +464,7 @@ async def manual_update_registration(
     db: Session = Depends(get_db)
 ):
     """Manually update registration flags (spam, temporary, etc.) - admin only."""
-    registration = get_registration_by_id(db, update_data.registration_id)
+    registration = get_registration_by_id(db, update_data.registration_id, current_user=current_user)
     if not registration:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -469,7 +486,8 @@ async def manual_update_registration(
         is_flagged=update_data.is_flagged,
         spam_score=update_data.spam_score,
         detection_notes=detection_notes,
-        status=update_data.status
+        status=update_data.status,
+        current_user=current_user,
     )
     
     # Create audit log
@@ -501,7 +519,7 @@ async def get_statistics(
 ):
     """Get statistics about registrations."""
     try:
-        stats = get_stats(db)
+        stats = get_stats(db, current_user=current_user)
         return StatsResponse(**stats)
     except Exception as e:
         import traceback
@@ -524,7 +542,7 @@ async def get_flagged_registrations(
     """Get paginated list of flagged registrations."""
     try:
         skip = (page - 1) * page_size
-        items, total = get_flagged_registrations_crud(db=db, skip=skip, limit=page_size)
+        items, total = get_flagged_registrations_crud(db=db, skip=skip, limit=page_size, current_user=current_user)
         
         total_pages = (total + page_size - 1) // page_size if page_size > 0 else 0
         
@@ -568,7 +586,8 @@ async def bulk_block_registrations(
         db=db,
         registration_ids=bulk_data.registration_ids,
         status="blocked",
-        detection_notes=f"Bulk blocked by {current_user.username}: {bulk_data.reason}"
+        detection_notes=f"Bulk blocked by {current_user.username}: {bulk_data.reason}",
+        current_user=current_user,
     )
     
     # Create audit log
@@ -615,7 +634,7 @@ async def bulk_import_registrations(
             phone_hash_value = hash_phone(phone_normalized)
             
             # Check if email already exists
-            existing = get_registration_by_email(db, reg_data.email)
+            existing = get_registration_by_email(db, reg_data.email, current_user=current_user)
             if existing:
                 results.append(BulkRegistrationResult(
                     email=reg_data.email,
@@ -630,7 +649,7 @@ async def bulk_import_registrations(
                 continue
             
             # Check phone limit (max 3)
-            count = count_registrations_by_phone(db, phone_hash_value)
+            count = count_registrations_by_phone(db, phone_hash_value, current_user=current_user)
             if count >= 3:
                 results.append(BulkRegistrationResult(
                     email=reg_data.email,
@@ -649,7 +668,9 @@ async def bulk_import_registrations(
                 db=db,
                 email=reg_data.email,
                 phone=reg_data.phone,
-                status="approved" if count < 3 else "pending"
+                status="approved" if count < 3 else "pending",
+                owner_user_id=current_user.id,
+                organization_id=current_user.organization_id,
             )
             
             allowed = registration.status != "blocked"
@@ -889,7 +910,7 @@ async def bulk_import_file(
             phone_hash_value = hash_phone(phone_normalized)
             
             # Check if email already exists
-            existing = get_registration_by_email(db, reg_data.email)
+            existing = get_registration_by_email(db, reg_data.email, current_user=current_user)
             if existing:
                 results.append(BulkRegistrationResult(
                     email=reg_data.email,
@@ -904,7 +925,7 @@ async def bulk_import_file(
                 continue
             
             # Check phone limit (max 3)
-            count = count_registrations_by_phone(db, phone_hash_value)
+            count = count_registrations_by_phone(db, phone_hash_value, current_user=current_user)
             if count >= 3:
                 results.append(BulkRegistrationResult(
                     email=reg_data.email,
@@ -923,7 +944,9 @@ async def bulk_import_file(
                 db=db,
                 email=reg_data.email,
                 phone=reg_data.phone,
-                status="approved" if count < 3 else "pending"
+                status="approved" if count < 3 else "pending",
+                owner_user_id=current_user.id,
+                organization_id=current_user.organization_id,
             )
             
             allowed = registration.status != "blocked"
@@ -1060,7 +1083,7 @@ async def bulk_import_raw(
             phone_hash_value = hash_phone(phone_normalized)
             
             # Check if email already exists
-            existing = get_registration_by_email(db, reg_data.email)
+            existing = get_registration_by_email(db, reg_data.email, current_user=current_user)
             if existing:
                 results.append(BulkRegistrationResult(
                     email=reg_data.email,
@@ -1075,7 +1098,7 @@ async def bulk_import_raw(
                 continue
             
             # Check phone limit (max 3)
-            count = count_registrations_by_phone(db, phone_hash_value)
+            count = count_registrations_by_phone(db, phone_hash_value, current_user=current_user)
             if count >= 3:
                 results.append(BulkRegistrationResult(
                     email=reg_data.email,
@@ -1094,7 +1117,9 @@ async def bulk_import_raw(
                 db=db,
                 email=reg_data.email,
                 phone=reg_data.phone,
-                status="approved" if count < 3 else "pending"
+                status="approved" if count < 3 else "pending",
+                owner_user_id=current_user.id,
+                organization_id=current_user.organization_id,
             )
             
             allowed = registration.status != "blocked"
@@ -1162,6 +1187,11 @@ async def get_audit_logs_endpoint(
 ):
     """Get paginated audit logs."""
     skip = (page - 1) * page_size
+    if not is_main_admin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only main admin can view global audit logs",
+        )
     items, total = get_audit_logs(db=db, skip=skip, limit=page_size)
     
     total_pages = (total + page_size - 1) // page_size
@@ -1247,7 +1277,7 @@ async def get_phone_registrations_endpoint(
     """Get phone numbers with their associated emails."""
     try:
         skip = (page - 1) * page_size
-        items, total = get_phone_registrations(db=db, skip=skip, limit=page_size)
+        items, total = get_phone_registrations(db=db, skip=skip, limit=page_size, current_user=current_user)
         
         total_pages = (total + page_size - 1) // page_size if page_size > 0 else 0
         
@@ -1279,7 +1309,7 @@ async def get_blocked_registrations_endpoint(
     """Get blocked phone numbers and their blocked emails."""
     try:
         skip = (page - 1) * page_size
-        items, total = get_blocked_registrations(db=db, skip=skip, limit=page_size)
+        items, total = get_blocked_registrations(db=db, skip=skip, limit=page_size, current_user=current_user)
         
         total_pages = (total + page_size - 1) // page_size if page_size > 0 else 0
         

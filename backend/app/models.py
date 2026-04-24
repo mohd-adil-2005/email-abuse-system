@@ -24,6 +24,8 @@ class Registration(Base):
     spam_score = Column(Integer, default=0, nullable=False)  # 0-100
     is_flagged = Column(Boolean, default=False, nullable=False, index=True)
     detection_notes = Column(Text, nullable=True)
+    owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    organization_id = Column(String(100), nullable=True, index=True)
 
     # Indexes for performance
     __table_args__ = (
@@ -42,6 +44,7 @@ class User(Base):
     hashed_password = Column(String(255), nullable=True)  # Nullable for OAuth-only users
     api_key = Column(String(255), nullable=True, unique=True, index=True)  # API key for programmatic access
     is_admin = Column(Boolean, default=False, nullable=False)
+    organization_id = Column(String(100), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     # OAuth2 / OIDC
     oauth_provider = Column(String(20), nullable=True, index=True)  # 'google' | 'github'

@@ -12,6 +12,7 @@ from typing import Optional
 from .database import get_db
 from .models import User
 from .auth import decode_access_token
+from .crud import resolve_organization_id
 
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -52,6 +53,10 @@ def get_current_user(
     user = db.query(User).filter(User.username == username).first()
     if user is None:
         raise credentials_exception
+    if not user.organization_id:
+        user.organization_id = resolve_organization_id(user.username, user.is_admin)
+        db.commit()
+        db.refresh(user)
     
     return user
 
@@ -85,6 +90,10 @@ def get_user_by_api_key(
         return None
     
     user = db.query(User).filter(User.api_key == api_key).first()
+    if user and not user.organization_id:
+        user.organization_id = resolve_organization_id(user.username, user.is_admin)
+        db.commit()
+        db.refresh(user)
     return user
 
 
@@ -125,6 +134,10 @@ def get_current_user_or_api_key(
         user = db.query(User).filter(User.username == username).first()
         if user is None:
             raise credentials_exception
+        if not user.organization_id:
+            user.organization_id = resolve_organization_id(user.username, user.is_admin)
+            db.commit()
+            db.refresh(user)
         
         return user
     

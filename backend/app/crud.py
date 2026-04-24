@@ -19,20 +19,41 @@ from .utils import (
 )
 
 
+# Tenant helpers
+MAIN_ADMIN_USERNAME = "admin"
+
+
+def is_main_admin(user: Optional[User]) -> bool:
+    return bool(user and user.is_admin and user.username == MAIN_ADMIN_USERNAME)
+
+
+def resolve_organization_id(username: str, is_admin: bool = False) -> str:
+    if is_admin and username == MAIN_ADMIN_USERNAME:
+        return "__main_admin__"
+    return username
+
+
+def _scoped_registration_query(db: Session, current_user: Optional[User]):
+    query = db.query(Registration)
+    if current_user and not is_main_admin(current_user):
+        query = query.filter(Registration.organization_id == current_user.organization_id)
+    return query
+
+
 # Registration CRUD
-def get_registration_by_email(db: Session, email: str) -> Optional[Registration]:
+def get_registration_by_email(db: Session, email: str, current_user: Optional[User] = None) -> Optional[Registration]:
     """Get registration by email."""
-    return db.query(Registration).filter(Registration.email == email).first()
+    return _scoped_registration_query(db, current_user).filter(Registration.email == email).first()
 
 
-def get_registration_by_id(db: Session, registration_id: int) -> Optional[Registration]:
+def get_registration_by_id(db: Session, registration_id: int, current_user: Optional[User] = None) -> Optional[Registration]:
     """Get registration by ID."""
-    return db.query(Registration).filter(Registration.id == registration_id).first()
+    return _scoped_registration_query(db, current_user).filter(Registration.id == registration_id).first()
 
 
-def count_registrations_by_phone(db: Session, phone_hash: str) -> int:
+def count_registrations_by_phone(db: Session, phone_hash: str, current_user: Optional[User] = None) -> int:
     """Count registrations for a phone number."""
-    return db.query(Registration).filter(Registration.phone_hash == phone_hash).count()
+    return _scoped_registration_query(db, current_user).filter(Registration.phone_hash == phone_hash).count()
 
 
 def create_registration(
@@ -40,7 +61,9 @@ def create_registration(
     email: str,
     phone: str,
     status: str = "pending",
-    detection_notes: Optional[str] = None
+    detection_notes: Optional[str] = None,
+    owner_user_id: Optional[int] = None,
+    organization_id: Optional[str] = None,
 ) -> Registration:
     """
     Create a new registration with abuse detection.
@@ -104,7 +127,9 @@ def create_registration(
         is_temporary=is_temp,
         spam_score=spam_score,
         is_flagged=is_flagged_value,
-        detection_notes=merged_notes
+        detection_notes=merged_notes,
+        owner_user_id=owner_user_id,
+        organization_id=organization_id,
     )
     
     db.add(registration)
@@ -118,10 +143,11 @@ def get_registrations(
     skip: int = 0,
     limit: int = 100,
     phone_hash: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    current_user: Optional[User] = None,
 ) -> Tuple[List[Registration], int]:
     """Get paginated registrations with optional filters."""
-    query = db.query(Registration)
+    query = _scoped_registration_query(db, current_user)
     
     if phone_hash:
         query = query.filter(Registration.phone_hash == phone_hash)
@@ -137,10 +163,11 @@ def get_registrations(
 def get_flagged_registrations(
     db: Session,
     skip: int = 0,
-    limit: int = 100
+    limit: int = 100,
+    current_user: Optional[User] = None,
 ) -> Tuple[List[Registration], int]:
     """Get paginated flagged registrations."""
-    query = db.query(Registration).filter(Registration.is_flagged == True)
+    query = _scoped_registration_query(db, current_user).filter(Registration.is_flagged == True)
     total = query.count()
     items = query.order_by(Registration.created_at.desc()).offset(skip).limit(limit).all()
     return items, total
@@ -170,10 +197,11 @@ def update_registration_status(
     db: Session,
     registration_id: int,
     status: str,
-    detection_notes: Optional[str] = None
+    detection_notes: Optional[str] = None,
+    current_user: Optional[User] = None,
 ) -> Optional[Registration]:
     """Update registration status."""
-    registration = get_registration_by_id(db, registration_id)
+    registration = get_registration_by_id(db, registration_id, current_user=current_user)
     if not registration:
         return None
     
@@ -194,10 +222,11 @@ def update_registration_flags(
     is_flagged: Optional[bool] = None,
     spam_score: Optional[int] = None,
     detection_notes: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    current_user: Optional[User] = None,
 ) -> Optional[Registration]:
     """Update registration flags (spam, temporary, etc.)."""
-    registration = get_registration_by_id(db, registration_id)
+    registration = get_registration_by_id(db, registration_id, current_user=current_user)
     if not registration:
         return None
     
@@ -236,12 +265,14 @@ def bulk_update_registration_status(
     db: Session,
     registration_ids: List[int],
     status: str,
-    detection_notes: Optional[str] = None
+    detection_notes: Optional[str] = None,
+    current_user: Optional[User] = None,
 ) -> int:
     """Bulk update registration statuses."""
-    count = db.query(Registration).filter(
-        Registration.id.in_(registration_ids)
-    ).update({
+    query = db.query(Registration).filter(Registration.id.in_(registration_ids))
+    if current_user and not is_main_admin(current_user):
+        query = query.filter(Registration.organization_id == current_user.organization_id)
+    count = query.update({
         "status": status,
         "detection_notes": detection_notes,
         "updated_at": datetime.utcnow()
@@ -262,14 +293,17 @@ def create_user(
     username: str,
     hashed_password: str,
     is_admin: bool = False,
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None,
+    organization_id: Optional[str] = None,
 ) -> User:
     """Create a new user."""
+    org_id = organization_id or resolve_organization_id(username, is_admin=is_admin)
     user = User(
         username=username,
         hashed_password=hashed_password,
         is_admin=is_admin,
-        api_key=api_key
+        api_key=api_key,
+        organization_id=org_id,
     )
     db.add(user)
     db.commit()
@@ -323,6 +357,7 @@ def get_or_create_oauth_user(
         oauth_provider=provider,
         oauth_id=oauth_id,
         is_admin=False,  # OAuth users are regular users by default
+        organization_id=resolve_organization_id(username, is_admin=False),
     )
     db.add(user)
     db.commit()
@@ -348,7 +383,8 @@ def generate_api_key(db: Session, user_id: int) -> Optional[str]:
 def get_phone_registrations(
     db: Session,
     skip: int = 0,
-    limit: int = 100
+    limit: int = 100,
+    current_user: Optional[User] = None,
 ) -> Tuple[List[dict], int]:
     """
     Get phone numbers grouped with their associated emails.
@@ -359,23 +395,29 @@ def get_phone_registrations(
     from sqlalchemy import func
     
     # Group by phone_hash and get counts
-    phone_groups = db.query(
+    phone_groups_query = db.query(
         Registration.phone_hash,
         Registration.phone_normalized,
         func.count(Registration.id).label('email_count')
-    ).group_by(
+    )
+    if current_user and not is_main_admin(current_user):
+        phone_groups_query = phone_groups_query.filter(Registration.organization_id == current_user.organization_id)
+    phone_groups = phone_groups_query.group_by(
         Registration.phone_hash,
         Registration.phone_normalized
     ).order_by(func.count(Registration.id).desc()).offset(skip).limit(limit).all()
-    
-    total = db.query(func.count(func.distinct(Registration.phone_hash))).scalar()
+    total_query = db.query(func.count(func.distinct(Registration.phone_hash)))
+    if current_user and not is_main_admin(current_user):
+        total_query = total_query.filter(Registration.organization_id == current_user.organization_id)
+    total = total_query.scalar()
     
     # Get emails for each phone
     result = []
     for phone_hash, phone_normalized, email_count in phone_groups:
-        emails = db.query(Registration).filter(
-            Registration.phone_hash == phone_hash
-        ).order_by(Registration.created_at.desc()).all()
+        emails_query = db.query(Registration).filter(Registration.phone_hash == phone_hash)
+        if current_user and not is_main_admin(current_user):
+            emails_query = emails_query.filter(Registration.organization_id == current_user.organization_id)
+        emails = emails_query.order_by(Registration.created_at.desc()).all()
         
         result.append({
             "phone_hash": phone_hash,
@@ -401,7 +443,8 @@ def get_phone_registrations(
 def get_blocked_registrations(
     db: Session,
     skip: int = 0,
-    limit: int = 100
+    limit: int = 100,
+    current_user: Optional[User] = None,
 ) -> Tuple[List[dict], int]:
     """
     Get blocked phone numbers and their blocked emails.
@@ -412,13 +455,11 @@ def get_blocked_registrations(
     from sqlalchemy import func
     
     # Get blocked registrations
-    blocked = db.query(Registration).filter(
-        Registration.status == "blocked"
-    ).order_by(Registration.created_at.desc()).offset(skip).limit(limit).all()
-    
-    total = db.query(Registration).filter(
-        Registration.status == "blocked"
-    ).count()
+    blocked_query = db.query(Registration).filter(Registration.status == "blocked")
+    if current_user and not is_main_admin(current_user):
+        blocked_query = blocked_query.filter(Registration.organization_id == current_user.organization_id)
+    blocked = blocked_query.order_by(Registration.created_at.desc()).offset(skip).limit(limit).all()
+    total = blocked_query.count()
     
     # Group by phone_hash
     phone_dict = {}
@@ -494,15 +535,15 @@ def create_or_update_phone_override(
 
 
 # Stats
-def get_stats(db: Session) -> dict:
+def get_stats(db: Session, current_user: Optional[User] = None) -> dict:
     """Get statistics about registrations."""
-    total = db.query(Registration).count()
-    blocked = db.query(Registration).filter(Registration.status == "blocked").count()
-    unique_phones = db.query(func.count(func.distinct(Registration.phone_hash))).scalar()
-    temporary_blocked = db.query(Registration).filter(Registration.is_temporary == True).count()
-    flagged = db.query(Registration).filter(Registration.is_flagged == True).count()
-    
-    avg_score_result = db.query(func.avg(Registration.spam_score)).scalar()
+    base_query = _scoped_registration_query(db, current_user)
+    total = base_query.count()
+    blocked = base_query.filter(Registration.status == "blocked").count()
+    unique_phones = base_query.with_entities(func.count(func.distinct(Registration.phone_hash))).scalar()
+    temporary_blocked = base_query.filter(Registration.is_temporary == True).count()
+    flagged = base_query.filter(Registration.is_flagged == True).count()
+    avg_score_result = base_query.with_entities(func.avg(Registration.spam_score)).scalar()
     avg_score = float(avg_score_result) if avg_score_result else 0.0
     
     return {
