@@ -16,6 +16,15 @@ import joblib
 import numpy as np
 from pathlib import Path
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    classification_report,
+)
+from sklearn.model_selection import train_test_split
 from typing import List, Tuple, Optional
 
 # Base path for data (train_model.py is in backend/)
@@ -223,8 +232,53 @@ def train_model():
 
     print(f"\nTotal: {len(X)} samples ({ham_count} ham, {spam_count} spam)")
     print("Training Random Forest...")
+
+    # Split dataset for proper evaluation.
+    # Stratify when both classes are present to preserve class ratio.
+    can_stratify = len(np.unique(y)) > 1 and len(X) >= 10
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.2,
+        random_state=42,
+        stratify=y if can_stratify else None,
+    )
+
     model = RandomForestClassifier(n_estimators=200, max_depth=15, min_samples_split=2, random_state=42)
-    model.fit(X, y)
+    model.fit(X_train, y_train)
+
+    # Evaluate model on holdout test set.
+    y_pred = model.predict(X_test)
+    acc = float(accuracy_score(y_test, y_pred))
+    prec = float(precision_score(y_test, y_pred, zero_division=0))
+    rec = float(recall_score(y_test, y_pred, zero_division=0))
+    f1 = float(f1_score(y_test, y_pred, zero_division=0))
+    cm = confusion_matrix(y_test, y_pred).tolist()
+    clf_report = classification_report(y_test, y_pred, target_names=["ham", "spam"], zero_division=0)
+
+    print("\nModel Evaluation (Test Set):")
+    print(f"  Accuracy : {acc:.4f}")
+    print(f"  Precision: {prec:.4f}")
+    print(f"  Recall   : {rec:.4f}")
+    print(f"  F1-score : {f1:.4f}")
+    print("  Confusion Matrix [ham, spam]:")
+    print(f"    {cm}")
+
+    metadata["split"] = {
+        "train_samples": int(len(X_train)),
+        "test_samples": int(len(X_test)),
+        "test_size": 0.2,
+        "stratified": bool(can_stratify),
+        "random_state": 42,
+    }
+    metadata["evaluation"] = {
+        "accuracy": acc,
+        "precision": prec,
+        "recall": rec,
+        "f1_score": f1,
+        "confusion_matrix": cm,
+        "classification_report": clf_report,
+    }
 
     app_dir = Path(__file__).parent / "app"
     model_path = app_dir / "spam_model.joblib"

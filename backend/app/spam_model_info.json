@@ -11,9 +11,33 @@
       "spam": 16852
     }
   },
-  "training_date": "2026-03-02T23:03:06.885441",
+  "training_date": "2026-04-16T02:14:42.269383",
   "total_samples": 37588,
   "total_ham": 19345,
   "total_spam": 18243,
-  "model": "RandomForestClassifier (n_estimators=200, max_depth=15)"
+  "model": "RandomForestClassifier (n_estimators=200, max_depth=15)",
+  "split": {
+    "train_samples": 30070,
+    "test_samples": 7518,
+    "test_size": 0.2,
+    "stratified": true,
+    "random_state": 42
+  },
+  "evaluation": {
+    "accuracy": 0.7118914604948124,
+    "precision": 0.72627403112603,
+    "recall": 0.6522334886270211,
+    "f1_score": 0.6872653768408894,
+    "confusion_matrix": [
+      [
+        2972,
+        897
+      ],
+      [
+        1269,
+        2380
+      ]
+    ],
+    "classification_report": "              precision    recall  f1-score   support\n\n         ham       0.70      0.77      0.73      3869\n        spam       0.73      0.65      0.69      3649\n\n    accuracy                           0.71      7518\n   macro avg       0.71      0.71      0.71      7518\nweighted avg       0.71      0.71      0.71      7518\n"
+  }
 }
