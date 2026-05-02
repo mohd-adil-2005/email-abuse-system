@@ -9,7 +9,7 @@ services:
     environment:
       # Production: set DATABASE_URL in your deployment environment.
       # Local fallback keeps current docker-compose behavior with db service.
-      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg2://postgres:postgres@db:5432/email_abuse}
+     
       # Worker tuning: auto by CPU cores (clamped by MIN/MAX).
       # To force a fixed value, set WEB_CONCURRENCY in your env.
       - MIN_WORKERS=${MIN_WORKERS:-2}
