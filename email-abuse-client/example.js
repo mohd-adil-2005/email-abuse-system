@@ -24,7 +24,7 @@ async function main() {
 
   // 3. Login and get stats (protected)
   try {
-    const loginRes = await client.login('admin', 'adminpass');
+    const loginRes = await client.login('admin', 'gtedfe');
     const admin = client.withToken(loginRes.access_token);
     const stats = await admin.getStats();
     console.log('Stats:', stats);
